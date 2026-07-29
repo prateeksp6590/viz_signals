@@ -35,7 +35,7 @@ class InfluxReader:
             url=settings.INFLUX_URL,
             token=settings.INFLUX_TOKEN,
             org=settings.INFLUX_ORG,
-            timeout=60_000,
+            timeout=settings.INFLUX_QUERY_TIMEOUT_MS,
         )
         self._query_api = self._client.query_api()
         self._symbol_map = symbol_map
@@ -56,13 +56,24 @@ class InfluxReader:
 
     # ── queries ───────────────────────────────────────────────────────────────
 
-    def _query(self, measurement: str, start: str, stop: str | None = None) -> pd.DataFrame:
+    @staticmethod
+    def _field_filter(fields=None) -> str:
+        """Restrict to the fields we read. Cuts rows scanned (billed) and keeps the
+        pivot small enough not to trip the HTTP read timeout."""
+        f = settings.INFLUX_FIELDS if fields is None else fields
+        if not f:
+            return ''
+        conds = ' or '.join(f'r._field == "{_flux_escape(x)}"' for x in f)
+        return f'  |> filter(fn: (r) => {conds})\n'
+
+    def _query(self, measurement: str, start: str, stop: str | None = None,
+               fields=None) -> pd.DataFrame:
         rng = f'start: {start}' + (f', stop: {stop}' if stop else '')
         flux = f'''
 from(bucket: "{_flux_escape(self.bucket_name())}")
   |> range({rng})
   |> filter(fn: (r) => r._measurement == "{_flux_escape(measurement)}")
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+{self._field_filter(fields)}  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time"])
 '''
         try:
@@ -112,24 +123,34 @@ from(bucket: "{_flux_escape(self.bucket_name())}")
         else:
             start = f'-{settings.LOOKBACK_MINUTES}m'      # cold start: no watermarks yet
 
-        wanted = ', '.join(f'"{_flux_escape(m)}"' for m in sorted(set(meas_of.values())))
-        flux = f"""
+        # chunk the measurement set: one giant pivoted query times out
+        meas_list = sorted(set(meas_of.values()))
+        chunk = max(1, settings.INFLUX_QUERY_CHUNK)
+        frames = []
+        for i in range(0, len(meas_list), chunk):
+            batch = meas_list[i:i + chunk]
+            wanted = ', '.join(f'"{_flux_escape(m)}"' for m in batch)
+            flux = f"""
 from(bucket: "{_flux_escape(self.bucket_name())}")
   |> range(start: {start})
   |> filter(fn: (r) => contains(value: r._measurement, set: [{wanted}]))
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+{self._field_filter()}  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time"])
 """
-        try:
-            df = self._query_api.query_data_frame(flux)
-        except Exception as e:
-            logger.error(f'Batched influx query failed ({len(instrument_keys)} instruments): {e}')
-            return {}
-        if isinstance(df, list):
-            df = pd.concat(df, ignore_index=True) if df else pd.DataFrame()
-        if df is None or df.empty or '_time' not in df.columns:
-            return {}
+            try:
+                df = self._query_api.query_data_frame(flux)
+            except Exception as e:
+                logger.error(f'Batched influx query failed '
+                             f'(chunk {i // chunk + 1}, {len(batch)} measurements): {e}')
+                continue
+            if isinstance(df, list):
+                df = pd.concat(df, ignore_index=True) if df else pd.DataFrame()
+            if df is not None and not df.empty and '_time' in df.columns:
+                frames.append(df)
 
+        if not frames:
+            return {}
+        df = pd.concat(frames, ignore_index=True)
         df = df.drop(columns=[c for c in _META_COLS if c in df.columns and c != '_measurement'])
         df = df.set_index('_time').sort_index()
         by_meas = {m: g.drop(columns=['_measurement']) for m, g in df.groupby('_measurement')}

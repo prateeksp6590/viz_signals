@@ -140,23 +140,49 @@ def main():
     except Exception as e:
         no(f'fetch_range failed: {e}')
 
-    # the batched query, which is what runs every cycle in production.
-    # Pass a real historical watermark: with all-None the reader correctly falls back
-    # to a relative -LOOKBACK_MINUTES window, which outside market hours is empty and
-    # would look like a failure.
+    # The batched query is the production path, so test the two loads production
+    # actually issues: a small incremental poll, and the worst case cold start.
+    import time as _t
+    inc_since = stop - timedelta(minutes=2)
     try:
-        got = reader.fetch_many(probe, {k: start for k in probe})
+        t0 = _t.time()
+        got = reader.fetch_many(probe, {k: inc_since for k in probe})
+        dt = _t.time() - t0
+        tot = sum(len(v) for v in got.values())
         if got:
-            tot = sum(len(v) for v in got.values())
-            ok(f'fetch_many (batched, 1 query): {len(got)}/{len(probe)} instruments, '
-               f'{tot:,} rows total')
-            if len(got) < len(probe):
-                warn(f'missing: {[reader.measurement_name(k) for k in probe if k not in got]}')
+            ok(f'fetch_many incremental (2 min, {len(probe)} instruments): '
+               f'{len(got)} returned, {tot:,} rows in {dt:.1f}s')
         else:
-            no('fetch_many returned nothing while fetch_range worked — the batched '
-               'contains()/groupby path is broken (this IS the production path)')
+            no('fetch_many returned nothing for a window where fetch_range found data '
+               '- the batched contains()/groupby path is broken (this IS production)')
     except Exception as e:
         no(f'fetch_many raised: {e}')
+
+    # cold start: every view empty -> one LOOKBACK_MINUTES window over ALL instruments.
+    # This is what runs if the engine restarts mid-session, and it is the query that
+    # times out if the instrument set is not chunked.
+    cold_since = stop - timedelta(minutes=settings.LOOKBACK_MINUTES)
+    allk = settings.ANALYZE_INSTRUMENTS
+    try:
+        t0 = _t.time()
+        got = reader.fetch_many(allk, {k: cold_since for k in allk})
+        dt = _t.time() - t0
+        tot = sum(len(v) for v in got.values())
+        nq = -(-len(set(reader.measurement_name(k) for k in allk)) // settings.INFLUX_QUERY_CHUNK)
+        if not got:
+            no(f'cold start returned nothing ({len(allk)} instruments, '
+               f'{settings.LOOKBACK_MINUTES}m) - check the log above for a timeout')
+        elif dt > 30:
+            warn(f'cold start SLOW: {tot:,} rows in {dt:.1f}s over {nq} chunk(s). '
+                 f'Lower INFLUX_QUERY_CHUNK or LOOKBACK_MINUTES.')
+        else:
+            ok(f'cold start: {len(got)}/{len(allk)} instruments, {tot:,} rows in '
+               f'{dt:.1f}s over {nq} chunk(s) of {settings.INFLUX_QUERY_CHUNK}')
+        print(f'        fields pulled: {settings.INFLUX_FIELDS or "ALL"}  '
+              f'(poll interval is {settings.POLL_INTERVAL_SECS}s - a cycle must finish '
+              f'well inside it)')
+    except Exception as e:
+        no(f'cold start raised: {e}')
 
     # ── 4. strategy over that real data ──────────────────────────────────────
     print('\n-- 4. strategy on real ticks')

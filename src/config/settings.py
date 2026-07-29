@@ -15,6 +15,16 @@ INFLUX_ORG   = os.getenv('INFLUX_ORG')
 INFLUX_BUCKET  = os.getenv('INFLUX_BUCKET', 'tick_data')
 SIGNALS_BUCKET = os.getenv('SIGNALS_BUCKET', 'signals')
 
+# Query shaping. A single pivoted query over every instrument x a long window is
+# enough to blow the HTTP read timeout: 6 instruments x one session was ~186k rows
+# and timed out at 60s, so a cold start over 79 instruments x LOOKBACK_MINUTES
+# (~370k rows) certainly would. Chunk the instruments, and pull only the fields the
+# strategy actually reads -- InfluxDB bills per byte scanned as well as per query.
+INFLUX_QUERY_CHUNK = int(os.getenv('INFLUX_QUERY_CHUNK', '20'))   # instruments/query
+INFLUX_QUERY_TIMEOUT_MS = int(os.getenv('INFLUX_QUERY_TIMEOUT_MS', '120000'))
+INFLUX_FIELDS = [f.strip() for f in os.getenv('INFLUX_FIELDS', 'ltp,vtt,oi').split(',')
+                 if f.strip()]                                    # empty = every field
+
 # ── Instruments ───────────────────────────────────────────────────────────────
 ANALYZE_INSTRUMENTS = [
     k.strip() for k in os.getenv('ANALYZE_INSTRUMENTS', '').split(',') if k.strip()
