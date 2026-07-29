@@ -17,8 +17,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import warnings
 from dotenv import load_dotenv
 load_dotenv()
+try:                                   # metadata queries legitimately have no pivot
+    from influxdb_client.client.warnings import MissingPivotFunction
+    warnings.simplefilter('ignore', MissingPivotFunction)
+except Exception:
+    pass
 
 IST = timezone(timedelta(hours=5, minutes=30))
 P = F = 0
@@ -134,9 +140,12 @@ def main():
     except Exception as e:
         no(f'fetch_range failed: {e}')
 
-    # the batched query, which is what runs every cycle in production
+    # the batched query, which is what runs every cycle in production.
+    # Pass a real historical watermark: with all-None the reader correctly falls back
+    # to a relative -LOOKBACK_MINUTES window, which outside market hours is empty and
+    # would look like a failure.
     try:
-        got = reader.fetch_many(probe, {k: None for k in probe})
+        got = reader.fetch_many(probe, {k: start for k in probe})
         if got:
             tot = sum(len(v) for v in got.values())
             ok(f'fetch_many (batched, 1 query): {len(got)}/{len(probe)} instruments, '
@@ -145,7 +154,7 @@ def main():
                 warn(f'missing: {[reader.measurement_name(k) for k in probe if k not in got]}')
         else:
             no('fetch_many returned nothing while fetch_range worked — the batched '
-               'contains()/groupby path is broken (this is the production path)')
+               'contains()/groupby path is broken (this IS the production path)')
     except Exception as e:
         no(f'fetch_many raised: {e}')
 
@@ -186,11 +195,15 @@ def main():
     try:
         import shutil
         avail = int(os.popen("free -m | awk '/^Mem:/{print $7}'").read() or 0)
-        est = 8 * len(settings.ANALYZE_INSTRUMENTS) * settings.LOOKBACK_MINUTES
-        print(f'        rough need ~{est} MB for {len(settings.ANALYZE_INSTRUMENTS)} '
-              f'instruments x {settings.LOOKBACK_MINUTES}m; {avail} MB available')
-        (ok if avail > est * 1.5 else warn)(
-            f'memory headroom {"adequate" if avail > est*1.5 else "tight — cut LOOKBACK_MINUTES or instruments"}')
+        # rows = instruments x minutes x 60s x ticks/sec; ~12 float64 cols; pandas
+        # overhead ~3x the raw buffer.
+        n = len(settings.ANALYZE_INSTRUMENTS)
+        rows = n * settings.LOOKBACK_MINUTES * 60 * 1.3
+        est = int(rows * 12 * 8 * 3 / 1_000_000)
+        print(f'        rough need ~{est} MB ({rows/1e6:.2f}M rows) for {n} instruments '
+              f'x {settings.LOOKBACK_MINUTES}m; {avail} MB available')
+        (ok if avail > est * 3 else warn)(
+            f'memory headroom {"adequate" if avail > est*3 else "tight — cut LOOKBACK_MINUTES or trim instruments"}')
     except Exception:
         warn('could not read memory')
 

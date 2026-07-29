@@ -43,6 +43,8 @@ The angle is unsigned, so direction comes from the most recent leg
 (n-N1 -> n): positive slope -> ENTER_LONG, negative -> ENTER_SHORT.
 """
 
+import math
+
 from ..models import Signal, SignalAction
 from .angle_math import (N1_DEFAULT, N2_DEFAULT, adaptive_threshold,  # noqa: F401
                          angle_at, angle_series, is_upward_bend)

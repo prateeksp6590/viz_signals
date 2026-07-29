@@ -101,12 +101,16 @@ from(bucket: "{_flux_escape(self.bucket_name())}")
         if not instrument_keys:
             return {}
         meas_of = {k: self.measurement_name(k) for k in instrument_keys}
+        # Use the OLDEST watermark we have. Requiring *every* instrument to have one
+        # meant a single permanently-quiet leg (an illiquid MCX strike that never
+        # ticks) forced a full LOOKBACK_MINUTES re-fetch of all instruments on every
+        # cycle -- which defeats the point of batching, since InfluxDB bills per query
+        # AND per byte scanned.
         seen = [since_map[k] for k in instrument_keys if since_map.get(k) is not None]
-        if len(seen) == len(instrument_keys) and seen:
-            oldest = min(seen)
-            start = oldest.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+        if seen:
+            start = min(seen).astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
         else:
-            start = f'-{settings.LOOKBACK_MINUTES}m'      # at least one cold view
+            start = f'-{settings.LOOKBACK_MINUTES}m'      # cold start: no watermarks yet
 
         wanted = ', '.join(f'"{_flux_escape(m)}"' for m in sorted(set(meas_of.values())))
         flux = f"""
