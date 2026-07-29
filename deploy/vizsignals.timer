@@ -1,0 +1,14 @@
+# /etc/systemd/system/vizsignals.timer
+# Start a few minutes after the feeder so there is already tick history to
+# measure an angle against (the strategy needs ANGLE_N2 ticks before it emits
+# anything). run.py additionally waits for ENGINE_START and exits at ENGINE_STOP.
+[Unit]
+Description=Start viz_signals on trading days
+
+[Timer]
+OnCalendar=Mon..Fri 09:20 Asia/Kolkata
+Persistent=false
+Unit=vizsignals.service
+
+[Install]
+WantedBy=timers.target

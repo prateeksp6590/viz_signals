@@ -1,0 +1,166 @@
+"""Reads tick data written by viz_hedge.
+
+Schema (current -- matches viz_hedge/src/services/influx_writer.py):
+  bucket      : ONE shared bucket, settings.INFLUX_BUCKET (default 'tick_data')
+  measurement : {EXCH}_{trading_symbol}   e.g. 'NSE_HDFCBANK',
+                'BSE_SENSEX 77000 CE 30 JUL 26'   -- NO _YYYYMMDD suffix
+                falls back to instrument_key with '|' -> '_' if unmapped
+  tags        : segment, exch, symbol
+Days are separated by the point timestamp and the query time range, not by the
+bucket or measurement name.
+"""
+
+from datetime import datetime, timezone
+
+import pandas as pd
+from influxdb_client import InfluxDBClient
+
+from ..config import settings
+from ..utils.logger import logger
+
+TICK_FIELDS = ['ltp', 'ltq', 'vtt', 'oi', 'tbq', 'tsq',
+               'iv', 'delta', 'theta', 'gamma', 'vega', 'rho']
+
+_META_COLS = ['result', 'table', '_start', '_stop', '_measurement',
+              'segment', 'exch', 'symbol']
+
+
+def _flux_escape(v: str) -> str:
+    return v.replace('\\', '\\\\').replace('"', '\\"')
+
+
+class InfluxReader:
+    def __init__(self, symbol_map: dict[str, str]):
+        self._client = InfluxDBClient(
+            url=settings.INFLUX_URL,
+            token=settings.INFLUX_TOKEN,
+            org=settings.INFLUX_ORG,
+            timeout=60_000,
+        )
+        self._query_api = self._client.query_api()
+        self._symbol_map = symbol_map
+
+    def bucket_name(self) -> str:
+        return settings.INFLUX_BUCKET
+
+    @staticmethod
+    def exchange(instrument_key: str) -> str:
+        # 'NSE_FO|72272' -> 'NSE';  'BSE_FO|1234' -> 'BSE'
+        return instrument_key.split('|', 1)[0].split('_', 1)[0]
+
+    def measurement_name(self, instrument_key: str) -> str:
+        symbol = self._symbol_map.get(instrument_key)
+        if symbol:
+            return f'{self.exchange(instrument_key)}_{symbol}'
+        return instrument_key.replace('|', '_')
+
+    # ── queries ───────────────────────────────────────────────────────────────
+
+    def _query(self, measurement: str, start: str, stop: str | None = None) -> pd.DataFrame:
+        rng = f'start: {start}' + (f', stop: {stop}' if stop else '')
+        flux = f'''
+from(bucket: "{_flux_escape(self.bucket_name())}")
+  |> range({rng})
+  |> filter(fn: (r) => r._measurement == "{_flux_escape(measurement)}")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"])
+'''
+        try:
+            df = self._query_api.query_data_frame(flux)
+        except Exception as e:
+            logger.error(f'Influx query failed for {measurement}: {e}')
+            return pd.DataFrame()
+        if isinstance(df, list):
+            df = pd.concat(df, ignore_index=True) if df else pd.DataFrame()
+        if df is None or df.empty or '_time' not in df.columns:
+            return pd.DataFrame()
+        df = df.drop(columns=[c for c in _META_COLS if c in df.columns])
+        return df.set_index('_time').sort_index()
+
+    def fetch(self, instrument_key: str, since: datetime | None) -> pd.DataFrame:
+        """Ticks newer than `since` (exclusive), else the full lookback window."""
+        if since is not None:
+            start = since.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+        else:
+            start = f'-{settings.LOOKBACK_MINUTES}m'
+        df = self._query(self.measurement_name(instrument_key), start)
+        if since is not None and not df.empty:
+            df = df[df.index > since]
+        return df
+
+    def fetch_many(self, instrument_keys: list[str],
+                   since_map: dict[str, datetime]) -> dict[str, pd.DataFrame]:
+        """ONE Flux query for every instrument, split by measurement afterwards.
+
+        InfluxDB Cloud bills per query execution ($0.012 / 100), so polling N
+        instruments individually costs N x more than it needs to: at 100
+        instruments and a 5s loop that is 450k queries/day instead of 4.5k.
+        Range starts at the OLDEST `since` and each instrument is trimmed to its
+        own watermark afterwards.
+        """
+        if not instrument_keys:
+            return {}
+        meas_of = {k: self.measurement_name(k) for k in instrument_keys}
+        seen = [since_map[k] for k in instrument_keys if since_map.get(k) is not None]
+        if len(seen) == len(instrument_keys) and seen:
+            oldest = min(seen)
+            start = oldest.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
+        else:
+            start = f'-{settings.LOOKBACK_MINUTES}m'      # at least one cold view
+
+        wanted = ', '.join(f'"{_flux_escape(m)}"' for m in sorted(set(meas_of.values())))
+        flux = f"""
+from(bucket: "{_flux_escape(self.bucket_name())}")
+  |> range(start: {start})
+  |> filter(fn: (r) => contains(value: r._measurement, set: [{wanted}]))
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"])
+"""
+        try:
+            df = self._query_api.query_data_frame(flux)
+        except Exception as e:
+            logger.error(f'Batched influx query failed ({len(instrument_keys)} instruments): {e}')
+            return {}
+        if isinstance(df, list):
+            df = pd.concat(df, ignore_index=True) if df else pd.DataFrame()
+        if df is None or df.empty or '_time' not in df.columns:
+            return {}
+
+        df = df.drop(columns=[c for c in _META_COLS if c in df.columns and c != '_measurement'])
+        df = df.set_index('_time').sort_index()
+        by_meas = {m: g.drop(columns=['_measurement']) for m, g in df.groupby('_measurement')}
+
+        out: dict[str, pd.DataFrame] = {}
+        for key in instrument_keys:
+            g = by_meas.get(meas_of[key])
+            if g is None or g.empty:
+                continue
+            since = since_map.get(key)
+            out[key] = g[g.index > since] if since is not None else g
+        return out
+
+    def fetch_range(self, instrument_key: str, start: datetime, stop: datetime) -> pd.DataFrame:
+        """Explicit window -- used by the backtester to replay a past day."""
+        return self._query(
+            self.measurement_name(instrument_key),
+            start.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z'),
+            stop.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z'),
+        )
+
+    def list_measurements(self, days: int = 1) -> list[str]:
+        """Every measurement present in the bucket over the last `days` days."""
+        flux = f'''
+import "influxdata/influxdb/schema"
+schema.measurements(bucket: "{_flux_escape(self.bucket_name())}", start: -{days}d)
+'''
+        try:
+            df = self._query_api.query_data_frame(flux)
+        except Exception as e:
+            logger.error(f'measurement listing failed: {e}')
+            return []
+        if isinstance(df, list):
+            df = pd.concat(df, ignore_index=True) if df else pd.DataFrame()
+        return sorted(df['_value'].tolist()) if df is not None and '_value' in df else []
+
+    def close(self) -> None:
+        self._client.close()

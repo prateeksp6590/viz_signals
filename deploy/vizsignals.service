@@ -1,0 +1,31 @@
+# /etc/systemd/system/vizsignals.service
+# Signal generator. Runs on the SAME EC2 box as the feeder, but with hard
+# resource caps so it can never starve viz_hedge: a websocket tick lost to an
+# OOM is gone forever, whereas a missed signal is merely a missed signal.
+[Unit]
+Description=viz_signals - slope-angle signal generator
+After=network-online.target vizhedge-feeder.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/viz_signals
+EnvironmentFile=/home/ubuntu/viz_signals/.env
+ExecStart=/home/ubuntu/viz_signals/.venv/bin/python run.py
+
+# --- containment: the feeder always wins a resource fight ---
+MemoryMax=700M
+MemoryHigh=550M
+CPUQuota=60%
+Nice=5
+OOMScoreAdjust=500
+
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vizsignals
+
+[Install]
+WantedBy=multi-user.target

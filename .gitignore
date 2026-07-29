@@ -1,0 +1,14 @@
+.env
+__pycache__/
+*.pyc
+journal/
+KILL_SWITCH
+.venv/
+venv/
+
+# generated backtest artifacts / local data
+*.html
+out/
+*.csv
+.pytest_cache/
+.ipynb_checkpoints/
