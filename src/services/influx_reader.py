@@ -10,6 +10,7 @@ Days are separated by the point timestamp and the query time range, not by the
 bucket or measurement name.
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -123,12 +124,15 @@ from(bucket: "{_flux_escape(self.bucket_name())}")
         else:
             start = f'-{settings.LOOKBACK_MINUTES}m'      # cold start: no watermarks yet
 
-        # chunk the measurement set: one giant pivoted query times out
+        # chunk the measurement set: one giant pivoted query times out.
+        # Run the chunks CONCURRENTLY -- they are independent, and the wall clock is
+        # dominated by the ap-south-1 -> us-east-1 round trip rather than by InfluxDB
+        # compute, so N sequential chunks cost N x latency for no reason.
         meas_list = sorted(set(meas_of.values()))
         chunk = max(1, settings.INFLUX_QUERY_CHUNK)
-        frames = []
-        for i in range(0, len(meas_list), chunk):
-            batch = meas_list[i:i + chunk]
+        batches = [meas_list[i:i + chunk] for i in range(0, len(meas_list), chunk)]
+
+        def _one(batch):
             wanted = ', '.join(f'"{_flux_escape(m)}"' for m in batch)
             flux = f"""
 from(bucket: "{_flux_escape(self.bucket_name())}")
@@ -140,13 +144,23 @@ from(bucket: "{_flux_escape(self.bucket_name())}")
             try:
                 df = self._query_api.query_data_frame(flux)
             except Exception as e:
-                logger.error(f'Batched influx query failed '
-                             f'(chunk {i // chunk + 1}, {len(batch)} measurements): {e}')
-                continue
+                logger.error(f'Batched influx query failed ({len(batch)} measurements): {e}')
+                return None
             if isinstance(df, list):
                 df = pd.concat(df, ignore_index=True) if df else pd.DataFrame()
-            if df is not None and not df.empty and '_time' in df.columns:
-                frames.append(df)
+            return df if (df is not None and not df.empty and '_time' in df.columns) else None
+
+        frames = []
+        if len(batches) == 1:
+            r = _one(batches[0])
+            if r is not None:
+                frames.append(r)
+        else:
+            workers = min(len(batches), max(1, settings.INFLUX_QUERY_WORKERS))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for r in ex.map(_one, batches):
+                    if r is not None:
+                        frames.append(r)
 
         if not frames:
             return {}

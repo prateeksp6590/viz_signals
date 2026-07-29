@@ -22,6 +22,9 @@ SIGNALS_BUCKET = os.getenv('SIGNALS_BUCKET', 'signals')
 # strategy actually reads -- InfluxDB bills per byte scanned as well as per query.
 INFLUX_QUERY_CHUNK = int(os.getenv('INFLUX_QUERY_CHUNK', '20'))   # instruments/query
 INFLUX_QUERY_TIMEOUT_MS = int(os.getenv('INFLUX_QUERY_TIMEOUT_MS', '120000'))
+# Chunks run concurrently: EC2 is ap-south-1 and InfluxDB Cloud us-east-1, so each
+# query pays ~4s of transcontinental round trip regardless of how little it returns.
+INFLUX_QUERY_WORKERS = int(os.getenv('INFLUX_QUERY_WORKERS', '4'))
 INFLUX_FIELDS = [f.strip() for f in os.getenv('INFLUX_FIELDS', 'ltp,vtt,oi').split(',')
                  if f.strip()]                                    # empty = every field
 

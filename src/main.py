@@ -173,6 +173,11 @@ def main():
             logger.error(f'Cycle error: {e}', exc_info=True)
 
         elapsed = time.monotonic() - cycle_start
+        if elapsed > settings.POLL_INTERVAL_SECS:
+            # the loop cannot keep up: effective poll becomes `elapsed`, silently.
+            logger.warning(f'Cycle took {elapsed:.1f}s > POLL_INTERVAL_SECS='
+                           f'{settings.POLL_INTERVAL_SECS}s — raise the interval, lower '
+                           f'INFLUX_QUERY_CHUNK, or trim ANALYZE_INSTRUMENTS')
         stop_event.wait(max(0.0, settings.POLL_INTERVAL_SECS - elapsed))
 
 
