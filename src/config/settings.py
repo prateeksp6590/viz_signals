@@ -1,87 +1,104 @@
 """All configuration, env-driven. See docs §11 for the reference table."""
 
 import os
+import re
 from pathlib import Path
+
+
+def _env(key: str, default=None):
+    """os.getenv, but tolerant of trailing '# comments'.
+
+    systemd's EnvironmentFile= does NOT strip inline comments the way python-dotenv
+    does: it hands over the whole rest of the line. So a .env that works when loaded
+    by dotenv (preflight, CLI) crashes under systemd with e.g.
+        ValueError: invalid literal for int(): '60   # must exceed ANGLE_N2 ticks'
+    Stripping here makes both load paths behave identically.
+    """
+    v = os.getenv(key)
+    if v is None:
+        return default
+    v = re.sub(r'\s+#.*$', '', v).strip().strip('\'"')
+    return v if v != '' else default
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # ── InfluxDB (same instance viz_hedge writes to) ──────────────────────────────
-INFLUX_URL   = os.getenv('INFLUX_URL', 'http://localhost:8086')
-INFLUX_TOKEN = os.getenv('INFLUX_TOKEN')
-INFLUX_ORG   = os.getenv('INFLUX_ORG')
+INFLUX_URL   = _env('INFLUX_URL', 'http://localhost:8086')
+INFLUX_TOKEN = _env('INFLUX_TOKEN')
+INFLUX_ORG   = _env('INFLUX_ORG')
 # viz_hedge writes every day into ONE bucket with dateless measurements
 # ({EXCH}_{trading_symbol}); the timestamp separates days. Per-day buckets are
 # retired -- they hit InfluxDB Cloud's bucket-count quota.
-INFLUX_BUCKET  = os.getenv('INFLUX_BUCKET', 'tick_data')
-SIGNALS_BUCKET = os.getenv('SIGNALS_BUCKET', 'signals')
+INFLUX_BUCKET  = _env('INFLUX_BUCKET', 'tick_data')
+SIGNALS_BUCKET = _env('SIGNALS_BUCKET', 'signals')
 
 # Query shaping. A single pivoted query over every instrument x a long window is
 # enough to blow the HTTP read timeout: 6 instruments x one session was ~186k rows
 # and timed out at 60s, so a cold start over 79 instruments x LOOKBACK_MINUTES
 # (~370k rows) certainly would. Chunk the instruments, and pull only the fields the
 # strategy actually reads -- InfluxDB bills per byte scanned as well as per query.
-INFLUX_QUERY_CHUNK = int(os.getenv('INFLUX_QUERY_CHUNK', '20'))   # instruments/query
-INFLUX_QUERY_TIMEOUT_MS = int(os.getenv('INFLUX_QUERY_TIMEOUT_MS', '120000'))
+INFLUX_QUERY_CHUNK = int(_env('INFLUX_QUERY_CHUNK', '20'))   # instruments/query
+INFLUX_QUERY_TIMEOUT_MS = int(_env('INFLUX_QUERY_TIMEOUT_MS', '120000'))
 # Chunks run concurrently: EC2 is ap-south-1 and InfluxDB Cloud us-east-1, so each
 # query pays ~4s of transcontinental round trip regardless of how little it returns.
-INFLUX_QUERY_WORKERS = int(os.getenv('INFLUX_QUERY_WORKERS', '4'))
-INFLUX_FIELDS = [f.strip() for f in os.getenv('INFLUX_FIELDS', 'ltp,vtt,oi').split(',')
+INFLUX_QUERY_WORKERS = int(_env('INFLUX_QUERY_WORKERS', '4'))
+INFLUX_FIELDS = [f.strip() for f in _env('INFLUX_FIELDS', 'ltp,vtt,oi').split(',')
                  if f.strip()]                                    # empty = every field
 
 # ── Instruments ───────────────────────────────────────────────────────────────
 ANALYZE_INSTRUMENTS = [
-    k.strip() for k in os.getenv('ANALYZE_INSTRUMENTS', '').split(',') if k.strip()
+    k.strip() for k in _env('ANALYZE_INSTRUMENTS', '').split(',') if k.strip()
 ]
-NSE_JSON_PATH = Path(os.getenv(
+NSE_JSON_PATH = Path(_env(
     'NSE_JSON_PATH',
     str(REPO_ROOT.parent / 'viz_hedge' / 'data' / 'NSE.json'),
 ))
 
 # ── Engine loop ───────────────────────────────────────────────────────────────
-POLL_INTERVAL_SECS = float(os.getenv('POLL_INTERVAL_SECS', '5'))
-LOOKBACK_MINUTES   = int(os.getenv('LOOKBACK_MINUTES', '60'))
-ENGINE_START       = os.getenv('ENGINE_START', '09:16')   # IST HH:MM
-ENGINE_STOP        = os.getenv('ENGINE_STOP', '15:30')    # IST HH:MM
+POLL_INTERVAL_SECS = float(_env('POLL_INTERVAL_SECS', '5'))
+LOOKBACK_MINUTES   = int(_env('LOOKBACK_MINUTES', '60'))
+ENGINE_START       = _env('ENGINE_START', '09:16')   # IST HH:MM
+ENGINE_STOP        = _env('ENGINE_STOP', '15:30')    # IST HH:MM
 
 # ── Strategy: slope_angle ─────────────────────────────────────────────────────
-ANGLE_N1             = int(os.getenv('ANGLE_N1', '50'))     # middle point, n-N1
-ANGLE_N2             = int(os.getenv('ANGLE_N2', '80'))     # oldest point, n-N2
-ANGLE_THRESHOLD_DEG  = float(os.getenv('ANGLE_THRESHOLD_DEG', '60'))
-ANGLE_PRICE_MODE     = os.getenv('ANGLE_PRICE_MODE', 'pct')  # abs (Rs/tick) | pct (%/tick)
+ANGLE_N1             = int(_env('ANGLE_N1', '50'))     # middle point, n-N1
+ANGLE_N2             = int(_env('ANGLE_N2', '80'))     # oldest point, n-N2
+ANGLE_THRESHOLD_DEG  = float(_env('ANGLE_THRESHOLD_DEG', '60'))
+ANGLE_PRICE_MODE     = _env('ANGLE_PRICE_MODE', 'pct')  # abs (Rs/tick) | pct (%/tick)
 
 # Threshold: a fixed angle cannot survive a volatility regime change, so by
 # default fire on the top (1-q) of the instrument's OWN recent angle distribution.
 # Calibrated 2026-07-29 on BSE SENSEX 77500 CE: q=0.95 held up in both halves of
 # the day (PF 1.82 / 2.01) where q>=0.99 flipped sign between them.
-ANGLE_THRESH_MODE    = os.getenv('ANGLE_THRESH_MODE', 'percentile')  # fixed|percentile|mad
-ANGLE_WINDOW         = int(os.getenv('ANGLE_WINDOW', '2000'))   # ticks in adaptive window
-ANGLE_Q              = float(os.getenv('ANGLE_Q', '0.95'))      # percentile mode
-ANGLE_MAD_K          = float(os.getenv('ANGLE_MAD_K', '5'))     # mad mode
+ANGLE_THRESH_MODE    = _env('ANGLE_THRESH_MODE', 'percentile')  # fixed|percentile|mad
+ANGLE_WINDOW         = int(_env('ANGLE_WINDOW', '2000'))   # ticks in adaptive window
+ANGLE_Q              = float(_env('ANGLE_Q', '0.95'))      # percentile mode
+ANGLE_MAD_K          = float(_env('ANGLE_MAD_K', '5'))     # mad mode
 
 # Long-only: buy CE on an upward bend. Downside is captured by running the same
 # signal on the PE, not by shorting.
-ANGLE_LONG_ONLY      = os.getenv('ANGLE_LONG_ONLY', 'true').lower() == 'true'
-ANGLE_REQUIRE_CONVEX = os.getenv('ANGLE_REQUIRE_CONVEX', 'true').lower() == 'true'
-ANGLE_EXIT_ON_REVERSE = os.getenv('ANGLE_EXIT_ON_REVERSE', 'true').lower() == 'true'
+ANGLE_LONG_ONLY      = _env('ANGLE_LONG_ONLY', 'true').lower() == 'true'
+ANGLE_REQUIRE_CONVEX = _env('ANGLE_REQUIRE_CONVEX', 'true').lower() == 'true'
+ANGLE_EXIT_ON_REVERSE = _env('ANGLE_EXIT_ON_REVERSE', 'true').lower() == 'true'
 
 # ── Execution ─────────────────────────────────────────────────────────────────
-ORDER_MODE        = os.getenv('ORDER_MODE', 'paper')      # signals_only | paper | live
-ORDER_QTY_DEFAULT = int(os.getenv('ORDER_QTY_DEFAULT', '1'))
-SLIPPAGE_BPS      = float(os.getenv('SLIPPAGE_BPS', '5'))
+ORDER_MODE        = _env('ORDER_MODE', 'paper')      # signals_only | paper | live
+ORDER_QTY_DEFAULT = int(_env('ORDER_QTY_DEFAULT', '1'))
+SLIPPAGE_BPS      = float(_env('SLIPPAGE_BPS', '5'))
 
-UPSTOX_ACCESS_TOKEN  = os.getenv('UPSTOX_ACCESS_TOKEN')
-UPSTOX_ORDER_SANDBOX = os.getenv('UPSTOX_ORDER_SANDBOX', 'false').lower() == 'true'
+UPSTOX_ACCESS_TOKEN  = _env('UPSTOX_ACCESS_TOKEN')
+UPSTOX_ORDER_SANDBOX = _env('UPSTOX_ORDER_SANDBOX', 'false').lower() == 'true'
 
 # ── Risk gate ─────────────────────────────────────────────────────────────────
-SIGNAL_COOLDOWN_SECS = int(os.getenv('SIGNAL_COOLDOWN_SECS', '300'))
-MAX_OPEN_POSITIONS   = int(os.getenv('MAX_OPEN_POSITIONS', '5'))
-MAX_ORDER_NOTIONAL   = float(os.getenv('MAX_ORDER_NOTIONAL', '500000'))
-DAILY_LOSS_LIMIT     = float(os.getenv('DAILY_LOSS_LIMIT', '10000'))
-KILL_SWITCH_FILE     = Path(os.getenv('KILL_SWITCH_FILE', str(REPO_ROOT / 'KILL_SWITCH')))
+SIGNAL_COOLDOWN_SECS = int(_env('SIGNAL_COOLDOWN_SECS', '300'))
+MAX_OPEN_POSITIONS   = int(_env('MAX_OPEN_POSITIONS', '5'))
+MAX_ORDER_NOTIONAL   = float(_env('MAX_ORDER_NOTIONAL', '500000'))
+DAILY_LOSS_LIMIT     = float(_env('DAILY_LOSS_LIMIT', '10000'))
+KILL_SWITCH_FILE     = Path(_env('KILL_SWITCH_FILE', str(REPO_ROOT / 'KILL_SWITCH')))
 
 # ── Persistence ───────────────────────────────────────────────────────────────
-PERSIST_TO_INFLUX = os.getenv('PERSIST_TO_INFLUX', 'true').lower() == 'true'
-JOURNAL_DIR       = Path(os.getenv('JOURNAL_DIR', str(REPO_ROOT / 'journal')))
+PERSIST_TO_INFLUX = _env('PERSIST_TO_INFLUX', 'true').lower() == 'true'
+JOURNAL_DIR       = Path(_env('JOURNAL_DIR', str(REPO_ROOT / 'journal')))
 
 
 def validate() -> list[str]:

@@ -85,7 +85,10 @@ def from_influx(date_str: str, bucket: str):
         with InfluxDBClient(url=url, token=tok, org=org, timeout=60_000) as c:
             tables = c.query_api().query(flux, org=org)
     except Exception as e:
-        return 0, {}, None, str(e)
+        msg = ' '.join(str(e).split())
+        if 'could not find bucket' in msg or 'not found' in msg.lower():
+            return 0, {}, None, f'NO_BUCKET:{bucket}'
+        return 0, {}, None, (msg[:160] + '…') if len(msg) > 160 else msg
     per, newest, n = Counter(), None, 0
     for t in tables:
         for r in t.records:
@@ -121,7 +124,12 @@ def main() -> int:
     fills = [] if args.influx_only else _read_jsonl(jdir / 'fills.jsonl')
 
     if not args.influx_only and not jdir.exists():
-        print(f'  No journal directory for {date_str} — the engine has not run.')
+        print(f'  No journal directory for {date_str} — the engine has not run today.')
+        if live:
+            print('    during engine hours this means it is not running. Check:')
+            print('      systemctl list-timers vizsignals.timer')
+            print('      journalctl -u vizsignals -n 50 --no-pager')
+            print('    to start it for the rest of today:  sudo systemctl start vizsignals')
         rc = 2 if live else 1
 
     if sigs:
@@ -165,7 +173,11 @@ def main() -> int:
                   f'win rate {100 * wins / len(closed):.0f}% ({wins}/{len(closed)})')
 
     n_inf, _per, newest_inf, err = from_influx(date_str, bucket)
-    if err:
+    if err and err.startswith('NO_BUCKET:'):
+        print(f'\n  influx signals        : bucket "{bucket}" does not exist yet')
+        notes.append(f'the "{bucket}" bucket is created by the engine on its first run '
+                     f'(Journal._ensure_bucket) — expected before then')
+    elif err:
         print(f'\n  influx signals        : query failed — {err}')
         rc = max(rc, 1)
         notes.append(f'InfluxDB signal query failed: {err}')
