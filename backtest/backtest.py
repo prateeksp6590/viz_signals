@@ -218,6 +218,107 @@ def metrics(t: pd.DataFrame) -> dict:
 
 # ── reporting ─────────────────────────────────────────────────────────────────
 
+def validate(df, args) -> None:
+    """Is this configuration real, or did we fit one afternoon?
+
+    Three checks, in increasing order of how often they have caught us out:
+      1. direction split  - profit concentrated on one side may just be the day's drift
+      2. split-half       - the same params on each half of the session; a sign flip
+                            between halves means the full-day number is an artifact
+      3. null test        - random entries with the SAME exit rules. Exit geometry
+                            alone produces P&L, so a strategy must beat that, not zero.
+    """
+    kw = dict(slippage_bps=args.slippage_bps, cost_bps=args.cost_bps, stop_pct=args.stop_pct,
+              target_pct=args.target_pct, max_hold=args.max_hold, cooldown=args.cooldown,
+              flip=args.flip, thresh_mode=args.thresh_mode, window=args.window, q=args.q,
+              k=args.k, long_only=not args.allow_short, require_convex=not args.no_convex,
+              exit_on_down_bend=args.exit_on_down_bend, trail_pct=args.trail_pct,
+              trail_after_pct=args.trail_after_pct, stop_sigma=args.stop_sigma,
+              trail_sigma=args.trail_sigma, sigma_window=args.sigma_window,
+              sigma_horizon=args.sigma_horizon)
+
+    res = simulate(df, args.n1, args.n2, args.price_mode, args.threshold, **kw)
+    t, m = res['trades'], metrics(res['trades'])
+    print(f"\n{'='*78}\nVALIDATION\n{'='*78}")
+    if t.empty:
+        print('  No trades — nothing to validate.\n')
+        return
+    print(f"  full day: {m['trades']} trades, win {m['win_rate']:.1f}%, "
+          f"total {m['total_pnl']:+.2f}, PF {m['profit_factor']:.2f}, maxDD {m['max_dd']:.2f}")
+
+    print('\n  1. direction split')
+    for side, g in t.groupby('side'):
+        w = 100 * (g.pnl > 0).mean()
+        print(f'     {side:5} n={len(g):3d}  win {w:5.1f}%  pnl {g.pnl.sum():+9.2f}')
+    if t.side.nunique() > 1:
+        tot = t.groupby('side').pnl.sum()
+        if (tot > 0).sum() == 1:
+            print('     NOTE one side carries all the profit — could be the day\'s drift '
+                  'rather than an edge. Confirm on a day that trends the other way.')
+
+    print('\n  2. split-half')
+    mid = len(df) // 2
+    halves = [df.iloc[:mid].reset_index(drop=True), df.iloc[mid:].reset_index(drop=True)]
+    hm = []
+    for i, h in enumerate(halves, 1):
+        r = simulate(h, args.n1, args.n2, args.price_mode, args.threshold, **kw)
+        x = metrics(r['trades'])
+        hm.append(x)
+        print(f"     H{i}: {x['trades']:3d} trades, win {x['win_rate']:5.1f}%, "
+              f"total {x['total_pnl']:+9.2f}, PF {x['profit_factor']:.2f}")
+    if hm[0]['total_pnl'] * hm[1]['total_pnl'] < 0:
+        print('     FAIL sign flip between halves — the full-day figure is an artifact '
+              'of one stretch. Do not use these parameters.')
+    elif min(hm[0]['trades'], hm[1]['trades']) < 8:
+        print('     WEAK fewer than 8 trades in a half — too few to conclude anything.')
+    else:
+        print('     OK   both halves agree in sign.')
+
+    print(f'\n  3. null test ({args.null_runs} random-entry runs, identical exits)')
+    price = df['ltp'].to_numpy(dtype=float)
+    n_tr = len(t)
+    long_only = not args.allow_short
+    rng = np.random.default_rng(args.seed)
+    slip = args.slippage_bps / 10_000.0
+    lo = args.n2 + 1
+    hold_cap = args.max_hold or (len(price) - 1)
+
+    def one_run():
+        starts = rng.choice(np.arange(lo, len(price) - 1), size=min(n_tr, len(price) - lo - 1),
+                            replace=False)
+        dirs = np.ones(len(starts), dtype=int) if long_only else rng.choice([1, -1], len(starts))
+        total = 0.0
+        for st, d in zip(starts, dirs):
+            ep = price[st] * (1 + slip * d)
+            end = min(st + hold_cap, len(price) - 1)
+            peak, hit = 0.0, None
+            for n in range(st + 1, end + 1):
+                exc = (price[n] - ep) / ep * d
+                peak = max(peak, exc)
+                lvl = -args.stop_pct / 100.0 if args.stop_pct else -np.inf
+                if args.trail_pct and peak >= args.trail_after_pct / 100.0:
+                    lvl = max(lvl, peak - args.trail_pct / 100.0)
+                if exc <= lvl or (args.target_pct and exc >= args.target_pct / 100.0):
+                    hit = n
+                    break
+            n = hit if hit is not None else end
+            total += (price[n] * (1 - slip * d) - ep) * d
+        return total
+
+    null = np.array([one_run() for _ in range(args.null_runs)])
+    actual = m['total_pnl']
+    beat = float((null < actual).mean())
+    p = 1.0 - beat
+    print(f'     strategy {actual:+.2f}   random mean {null.mean():+.2f} '
+          f'sd {null.std():.2f}   beats {100*beat:.1f}%   p = {p:.3f}')
+    if null.mean() < 0 < actual:
+        print(f'     (random entries LOSE money here, so a positive result is not drift)')
+    print('     ' + ('OK   significant at p<0.05' if p < 0.05 else
+                     'WEAK suggestive but not significant' if p < 0.15 else
+                     'FAIL indistinguishable from random'))
+    print()
+
+
 def report(df, res, args):
     t, angle = res['trades'], res['angle']
     m = metrics(t)
@@ -426,6 +527,10 @@ def main():
     ap.add_argument('--sweep', action='store_true')
     ap.add_argument('--grid', action='store_true', help='with --sweep: also vary n1/n2')
     ap.add_argument('--save-trades', help='write the trade list to this CSV')
+    ap.add_argument('--validate', action='store_true',
+                    help='direction split + split-half + random-entry null test')
+    ap.add_argument('--null-runs', type=int, default=300)
+    ap.add_argument('--seed', type=int, default=7)
     args = ap.parse_args()
 
     if args.csv:
@@ -437,6 +542,9 @@ def main():
     if len(df) <= args.n2:
         raise SystemExit(f'only {len(df)} ticks; need more than n2={args.n2}')
 
+    if args.validate:
+        validate(df, args)
+        return
     if args.sweep_sigma:
         sweep_sigma(df, args)
         return

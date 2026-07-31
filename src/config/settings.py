@@ -46,9 +46,35 @@ INFLUX_FIELDS = [f.strip() for f in _env('INFLUX_FIELDS', 'ltp,vtt,oi').split(',
                  if f.strip()]                                    # empty = every field
 
 # ── Instruments ───────────────────────────────────────────────────────────────
+def _instruments_from_feeder(path: Path) -> list[str]:
+    """Read SUBSCRIBE_INSTRUMENTS out of the feeder's .env.
+
+    The feeder regenerates its chain every morning at ~09:09 (ATM moves, weeklies
+    expire). A static ANALYZE_INSTRUMENTS here goes stale the moment an expiry rolls:
+    yesterday's '30 JUL' strikes simply stop existing, and the engine would sit
+    polling measurements that will never tick again -- silently, since no data is
+    not an error. Inheriting keeps the two in lockstep with no extra plumbing.
+    """
+    try:
+        for line in path.read_text().splitlines():
+            if line.startswith('SUBSCRIBE_INSTRUMENTS='):
+                v = re.sub(r'\s+#.*$', '', line.split('=', 1)[1]).strip()
+                return [k.strip() for k in v.split(',') if k.strip()]
+    except Exception:
+        pass
+    return []
+
+
 ANALYZE_INSTRUMENTS = [
     k.strip() for k in _env('ANALYZE_INSTRUMENTS', '').split(',') if k.strip()
 ]
+# Fall back to (or explicitly follow) the feeder's live subscription list.
+FEEDER_ENV = Path(_env('FEEDER_ENV', str(REPO_ROOT.parent / 'viz_hedge' / '.env')))
+FOLLOW_FEEDER = _env('FOLLOW_FEEDER', 'auto')        # auto | always | never
+if FOLLOW_FEEDER == 'always' or (FOLLOW_FEEDER == 'auto' and not ANALYZE_INSTRUMENTS):
+    inherited = _instruments_from_feeder(FEEDER_ENV)
+    if inherited:
+        ANALYZE_INSTRUMENTS = inherited
 NSE_JSON_PATH = Path(_env(
     'NSE_JSON_PATH',
     str(REPO_ROOT.parent / 'viz_hedge' / 'data' / 'NSE.json'),
