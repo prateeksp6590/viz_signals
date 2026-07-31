@@ -19,6 +19,7 @@ from .services.signal_engine import SignalEngine
 from .services.brokers.paper import PaperBroker
 from .strategies.slope_angle import SlopeAngleStrategy
 from .utils.logger import logger
+from .utils.sizing import quantity_for, underlying_of
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -77,7 +78,10 @@ def _execute(sig, view, broker, tracker, journal) -> None:
         qty = pos.qty
     else:
         side = Side.BUY if sig.action == SignalAction.ENTER_LONG else Side.SELL
-        qty = sig.qty or settings.ORDER_QTY_DEFAULT
+        # lots x lot_size from the instrument master, per underlying
+        qty, why = quantity_for(sig.instrument_key, sig.symbol)
+        qty = sig.qty or qty
+        logger.debug(f'size {sig.symbol}: {why}')
 
     order = Order(
         instrument_key=sig.instrument_key, symbol=sig.symbol, side=side, qty=qty,

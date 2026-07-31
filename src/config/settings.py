@@ -75,6 +75,19 @@ if FOLLOW_FEEDER == 'always' or (FOLLOW_FEEDER == 'auto' and not ANALYZE_INSTRUM
     inherited = _instruments_from_feeder(FEEDER_ENV)
     if inherited:
         ANALYZE_INSTRUMENTS = inherited
+
+# Keep only the segments worth analysing. The feeder subscribes to far more than the
+# strategy should trade -- 55 equities ride along for storage, and analysing them
+# costs extra query chunks and ~3x the memory for instruments slope_angle was never
+# calibrated on.
+# Use ANALYZE_SEGMENTS=ALL to disable the filter. An EMPTY value will not work:
+# _env() treats empty as unset and hands back the default.
+_seg_raw = _env('ANALYZE_SEGMENTS', 'NSE_FO,BSE_FO,MCX_FO')
+ANALYZE_SEGMENTS = ([] if _seg_raw.strip().upper() in ('ALL', '*')
+                    else [x.strip().upper() for x in _seg_raw.split(',') if x.strip()])
+if ANALYZE_SEGMENTS:
+    ANALYZE_INSTRUMENTS = [k for k in ANALYZE_INSTRUMENTS
+                           if k.split('|', 1)[0].upper() in ANALYZE_SEGMENTS]
 NSE_JSON_PATH = Path(_env(
     'NSE_JSON_PATH',
     str(REPO_ROOT.parent / 'viz_hedge' / 'data' / 'NSE.json'),
@@ -110,6 +123,20 @@ ANGLE_EXIT_ON_REVERSE = _env('ANGLE_EXIT_ON_REVERSE', 'true').lower() == 'true'
 # ── Execution ─────────────────────────────────────────────────────────────────
 ORDER_MODE        = _env('ORDER_MODE', 'paper')      # signals_only | paper | live
 ORDER_QTY_DEFAULT = int(_env('ORDER_QTY_DEFAULT', '1'))
+
+# Size in LOTS per underlying; the actual quantity is lots x lot_size, and lot_size
+# is read from the instrument master (NIFTY 65, BANKNIFTY 30, SENSEX from BSE.json)
+# rather than hardcoded -- exchanges revise lot sizes and a stale constant would
+# silently misprice every trade.
+#   LOTS_BY_UNDERLYING=NIFTY:5,SENSEX:10,CRUDEOILM:1
+LOTS_BY_UNDERLYING = {}
+for _pair in _env('LOTS_BY_UNDERLYING', 'NIFTY:5,SENSEX:10').split(','):
+    if ':' in _pair:
+        _u, _n = _pair.split(':', 1)
+        try:
+            LOTS_BY_UNDERLYING[_u.strip().upper()] = int(_n)
+        except ValueError:
+            pass
 SLIPPAGE_BPS      = float(_env('SLIPPAGE_BPS', '5'))
 
 UPSTOX_ACCESS_TOKEN  = _env('UPSTOX_ACCESS_TOKEN')
