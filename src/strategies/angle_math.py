@@ -106,9 +106,15 @@ def adaptive_threshold(angle, mode: str = 'percentile', window: int = 2000,
     if mode == 'percentile':
         th = s.rolling(window, min_periods=mp).quantile(q)
     else:
-        med = s.rolling(window, min_periods=mp).median()
-        mad = (s - med).abs().rolling(window, min_periods=mp).median()
-        th = med + k * 1.4826 * mad
+        # TRUE rolling MAD: median(|x - median(x)|) computed within each window.
+        # The cheap version -- deviations from a rolling-median *series* -- is a
+        # different statistic, and it disagreed with the live latest-only path.
+        # Backtest/live parity matters more here than backtest speed.
+        def _mad(w):
+            m = np.median(w)
+            return m + k * 1.4826 * np.median(np.abs(w - m))
+        th = s.rolling(window, min_periods=mp).apply(_mad, raw=True)
+        return (th.shift(1).clip(lower=floor) if floor else th.shift(1)).to_numpy()
 
     th = th.shift(1)                       # strictly past information
     if floor:
@@ -160,3 +166,37 @@ def sigma_stop_pct(sigma_pct, k: float = 1.0, horizon_ticks: int = 50,
     """
     s = np.asarray(sigma_pct, dtype=float) * k * np.sqrt(max(1, horizon_ticks))
     return np.clip(s, lo, hi)
+
+
+def adaptive_threshold_latest(angle, mode: str = 'percentile', window: int = 2000,
+                              q: float = 0.99, k: float = 5.0,
+                              min_periods: int | None = None, floor: float = 0.0):
+    """The threshold for the LAST sample only — O(window) instead of a full rolling pass.
+
+    Live, we need one number per instrument per cycle. adaptive_threshold() builds the
+    entire rolling series (a pandas rolling quantile over the whole lookback) and then
+    throws all but the last value away; across ~79 instruments every few seconds that
+    dominates the cycle.
+
+    Matches adaptive_threshold()[-1] exactly, INCLUDING the one-sample shift: the value
+    returned uses angles up to n-1 only, never the current one.
+    """
+    if mode == 'fixed':
+        return None
+    if mode not in THRESH_MODES:
+        raise ValueError(f'mode must be one of {THRESH_MODES} (got {mode!r})')
+
+    a = np.asarray(angle, dtype=float)
+    mp = min_periods if min_periods is not None else max(50, window // 2)
+    past = a[max(0, a.size - 1 - window):a.size - 1]      # the shift: exclude the last
+    past = past[np.isfinite(past)]
+    if past.size < mp:
+        return float('nan')
+
+    if mode == 'percentile':
+        th = float(np.quantile(past, q))
+    else:
+        med = float(np.median(past))
+        mad = float(np.median(np.abs(past - med)))
+        th = med + k * 1.4826 * mad
+    return max(th, floor) if floor else th

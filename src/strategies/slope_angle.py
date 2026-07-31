@@ -47,7 +47,8 @@ import math
 
 from ..models import Signal, SignalAction
 from .angle_math import (N1_DEFAULT, N2_DEFAULT, adaptive_threshold,  # noqa: F401
-                         angle_at, angle_series, is_upward_bend)
+                         adaptive_threshold_latest, angle_at, angle_series,
+                         is_upward_bend)
 from .base import Strategy
 
 
@@ -92,15 +93,19 @@ class SlopeAngleStrategy(Strategy):
         if len(s) < self.warmup_ticks:
             return []
 
-        prices = s.to_numpy()
+        # Only as much history as the threshold window actually consumes. The view
+        # holds LOOKBACK_MINUTES of ticks (~4,700), but the angle at n plus a
+        # `window`-long history of angles needs only window + n2 + 2 prices.
+        need = self.window + self.n2 + 2 if self.thresh_mode != 'fixed' else self.n2 + 1
+        prices = s.to_numpy()[-need:]
         r = angle_series(prices, self.n1, self.n2, self.price_mode)
         ang = r['angle_deg']
         if ang.size == 0:
             return []
 
-        adaptive = adaptive_threshold(ang, self.thresh_mode, self.window,
-                                      self.q, self.mad_k)
-        thr = float(self.threshold) if adaptive is None else float(adaptive[-1])
+        adaptive = adaptive_threshold_latest(ang, self.thresh_mode, self.window,
+                                             self.q, self.mad_k)
+        thr = float(self.threshold) if adaptive is None else float(adaptive)
         angle = float(ang[-1])
         if not math.isfinite(angle) or not math.isfinite(thr) or angle < thr:
             return []

@@ -160,10 +160,15 @@ def main():
             _shutdown(f'engine stop time reached ({settings.ENGINE_STOP} IST)')
             break
         cycle_start = time.monotonic()
+        t_read = t_calc = 0.0
         try:
             market.refresh()
+            t_read = time.monotonic() - cycle_start
             tracker.update_marks(market)
-            for sig in engine.run_cycle():
+            _t = time.monotonic()
+            cycle_signals = engine.run_cycle()
+            t_calc = time.monotonic() - _t
+            for sig in cycle_signals:
                 if broker is None:
                     continue  # signals_only — already journaled
                 if gate.approve(sig):
@@ -175,9 +180,13 @@ def main():
         elapsed = time.monotonic() - cycle_start
         if elapsed > settings.POLL_INTERVAL_SECS:
             # the loop cannot keep up: effective poll becomes `elapsed`, silently.
-            logger.warning(f'Cycle took {elapsed:.1f}s > POLL_INTERVAL_SECS='
-                           f'{settings.POLL_INTERVAL_SECS}s — raise the interval, lower '
-                           f'INFLUX_QUERY_CHUNK, or trim ANALYZE_INSTRUMENTS')
+            logger.warning(
+                f'Cycle took {elapsed:.1f}s > POLL_INTERVAL_SECS='
+                f'{settings.POLL_INTERVAL_SECS}s  (influx read {t_read:.1f}s, '
+                f'strategy {t_calc:.1f}s). '
+                + ('Read-bound: lower INFLUX_QUERY_CHUNK, raise INFLUX_QUERY_WORKERS, '
+                   'or trim ANALYZE_INSTRUMENTS.' if t_read > t_calc else
+                   'Compute-bound: lower ANGLE_WINDOW or trim ANALYZE_INSTRUMENTS.'))
         stop_event.wait(max(0.0, settings.POLL_INTERVAL_SECS - elapsed))
 
 
