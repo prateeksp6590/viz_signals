@@ -179,6 +179,41 @@ MAX_ORDER_NOTIONAL   = float(_env('MAX_ORDER_NOTIONAL', '500000'))
 DAILY_LOSS_LIMIT     = float(_env('DAILY_LOSS_LIMIT', '10000'))
 KILL_SWITCH_FILE     = Path(_env('KILL_SWITCH_FILE', str(REPO_ROOT / 'KILL_SWITCH')))
 
+# ── Alerts ───────────────────────────────────────────────────────────────────
+# log | ntfy | telegram | whatsapp | twilio | off
+NOTIFY_BACKEND         = _env('NOTIFY_BACKEND', 'log')
+# "Strong" = cleared its own adaptive bar by this much. On the 30 Jul SENSEX move
+# the real breakout ran angle/threshold = 1.43 while marginal triggers sat at 1.07.
+# Calibrated on two real days of BSE SENSEX 77500 CE rather than guessed.
+# ratio 1.3 + a 15-minute cooldown gives ~11 alerts on a wild expiry day and ~14 on
+# a normal one, PER INSTRUMENT, and still catches the +122% move. Raising the ratio
+# to 1.8 cuts to 3-4 alerts but drops the biggest move (133% -> 63%): too selective.
+NOTIFY_MIN_ANGLE_RATIO = float(_env('NOTIFY_MIN_ANGLE_RATIO', '1.3'))
+# The recent-leg move does NOT transfer between instruments or regimes: median at a
+# trigger was 8.56% on expiry day. Left at 0 (off) rather than shipping a number
+# that is a no-op on one day and mutes everything on another.
+NOTIFY_MIN_MOVE_PCT    = float(_env('NOTIFY_MIN_MOVE_PCT', '0'))
+NOTIFY_COOLDOWN_SECS   = int(_env('NOTIFY_COOLDOWN_SECS', '900'))
+# Hard stop on volume: alerts cost money on WhatsApp and attention everywhere.
+NOTIFY_MAX_PER_DAY     = int(_env('NOTIFY_MAX_PER_DAY', '40'))
+NOTIFY_ACTIONS         = [a.strip().upper() for a in
+                          _env('NOTIFY_ACTIONS', 'ENTER_LONG').split(',') if a.strip()]
+
+NTFY_URL        = _env('NTFY_URL', 'https://ntfy.sh')
+NTFY_TOPIC      = _env('NTFY_TOPIC', '')
+TELEGRAM_TOKEN  = _env('TELEGRAM_TOKEN', '')
+TELEGRAM_CHAT_ID = _env('TELEGRAM_CHAT_ID', '')
+# WhatsApp Cloud API — business-initiated sends REQUIRE an approved template
+WHATSAPP_TOKEN    = _env('WHATSAPP_TOKEN', '')
+WHATSAPP_PHONE_ID = _env('WHATSAPP_PHONE_ID', '')
+WHATSAPP_TO       = _env('WHATSAPP_TO', '')          # E.164, e.g. 9198XXXXXXXX
+WHATSAPP_TEMPLATE = _env('WHATSAPP_TEMPLATE', 'viz_signal_alert')
+WHATSAPP_LANG     = _env('WHATSAPP_LANG', 'en')
+TWILIO_SID   = _env('TWILIO_SID', '')
+TWILIO_TOKEN = _env('TWILIO_TOKEN', '')
+TWILIO_FROM  = _env('TWILIO_FROM', 'whatsapp:+14155238886')
+TWILIO_TO    = _env('TWILIO_TO', '')
+
 # ── Persistence ───────────────────────────────────────────────────────────────
 PERSIST_TO_INFLUX = _env('PERSIST_TO_INFLUX', 'true').lower() == 'true'
 JOURNAL_DIR       = Path(_env('JOURNAL_DIR', str(REPO_ROOT / 'journal')))

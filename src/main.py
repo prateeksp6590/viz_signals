@@ -16,6 +16,7 @@ from .services.market_view import MarketData
 from .services.position_tracker import PositionTracker
 from .services.risk_gate import RiskGate
 from .services.exit_manager import ExitManager
+from .services.notifier import Notifier
 from .services.signal_engine import SignalEngine
 from .services.brokers.paper import PaperBroker
 from .strategies.slope_angle import SlopeAngleStrategy
@@ -130,6 +131,7 @@ def main():
     gate    = RiskGate(tracker, journal)
     engine  = SignalEngine(STRATEGY, market, tracker, journal)
     exits   = ExitManager()
+    notifier = Notifier()
     broker  = _make_broker()
 
     logger.info(f'viz_signals starting — mode={settings.ORDER_MODE} '
@@ -159,6 +161,7 @@ def main():
             logger.warning(f'{tracker.open_count} LIVE position(s) still open — '
                            f'relying on broker intraday auto square-off')
         logger.info(f'Final: {tracker.summary()}')
+        notifier.close()
         journal.close()
         reader.close()
 
@@ -200,6 +203,7 @@ def main():
             cycle_signals = engine.run_cycle()
             t_calc = time.monotonic() - _t
             for sig in cycle_signals:
+                notifier.notify(sig)
                 if broker is None:
                     continue  # signals_only — already journaled
                 if gate.approve(sig):
