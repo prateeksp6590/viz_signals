@@ -187,7 +187,11 @@ def adaptive_threshold_latest(angle, mode: str = 'percentile', window: int = 200
         raise ValueError(f'mode must be one of {THRESH_MODES} (got {mode!r})')
 
     a = np.asarray(angle, dtype=float)
-    mp = min_periods if min_periods is not None else max(50, window // 2)
+    # `window` is a CAP, not a requirement. A thin MCX option accumulates ~300 ticks
+    # in an hour where NIFTY makes 5,000; demanding window//2 samples made the warm-up
+    # unreachable for them forever. Use whatever history exists, provided there are
+    # at least `min_periods` samples -- a 95th percentile is stable well below 2,000.
+    mp = min_periods if min_periods is not None else 200
     past = a[max(0, a.size - 1 - window):a.size - 1]      # the shift: exclude the last
     past = past[np.isfinite(past)]
     if past.size < mp:

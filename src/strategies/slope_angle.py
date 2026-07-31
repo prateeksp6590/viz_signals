@@ -70,6 +70,7 @@ class SlopeAngleStrategy(Strategy):
         self.price_mode = price_mode or settings.ANGLE_PRICE_MODE
         self.thresh_mode = thresh_mode or settings.ANGLE_THRESH_MODE
         self.window = g(window, settings.ANGLE_WINDOW)
+        self.min_samples = settings.ANGLE_MIN_SAMPLES
         self.q = g(q, settings.ANGLE_Q)
         self.mad_k = g(mad_k, settings.ANGLE_MAD_K)
         self.long_only = g(long_only, settings.ANGLE_LONG_ONLY)
@@ -83,7 +84,7 @@ class SlopeAngleStrategy(Strategy):
     def warmup_ticks(self) -> int:
         if self.thresh_mode == 'fixed':
             return self.n2 + 1
-        return self.n2 + 1 + max(50, self.window // 2)
+        return self.n2 + 1 + self.min_samples
 
     def generate_signals(self, view) -> list[Signal]:
         ticks = view.ticks
@@ -104,7 +105,8 @@ class SlopeAngleStrategy(Strategy):
             return []
 
         adaptive = adaptive_threshold_latest(ang, self.thresh_mode, self.window,
-                                             self.q, self.mad_k)
+                                             self.q, self.mad_k,
+                                             min_periods=self.min_samples)
         thr = float(self.threshold) if adaptive is None else float(adaptive)
         angle = float(ang[-1])
         if not math.isfinite(angle) or not math.isfinite(thr) or angle < thr:

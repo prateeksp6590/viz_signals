@@ -4,7 +4,7 @@ Exposes raw ticks, on-demand OHLCV bars, and the greeks/IV series over the
 configured lookback window. Refreshed incrementally each poll cycle.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 
 import pandas as pd
 
@@ -89,10 +89,29 @@ class MarketData:
             for key in settings.ANALYZE_INSTRUMENTS
         }
 
+    @staticmethod
+    def _exchange_open(instrument_key: str) -> bool:
+        """False once that exchange has closed for the day.
+
+        NSE/BSE stop at 15:30 while MCX runs to 23:30. Without this, a single engine
+        covering both would keep querying dead NSE instruments all evening and — worse
+        — their frozen views would keep satisfying the strategy on stale geometry.
+        """
+        exch = instrument_key.split('|', 1)[0].split('_', 1)[0].upper()
+        hhmm = settings.EXCHANGE_CLOSE.get(exch)
+        if not hhmm:
+            return True
+        try:
+            h, m = (int(x) for x in hhmm.split(':'))
+        except ValueError:
+            return True
+        return datetime.now(timezone(timedelta(hours=5, minutes=30))).time() <= dt_time(h, m)
+
     def refresh(self) -> None:
-        """One batched query per cycle for every instrument (see
-        InfluxReader.fetch_many -- InfluxDB Cloud bills per query execution)."""
-        keys = list(self.views)
+        """One batched query per cycle for every OPEN instrument."""
+        keys = [k for k in self.views if self._exchange_open(k)]
+        if not keys:
+            return
         since_map = {k: self.views[k].last_ts for k in keys}
         fetched = self._reader.fetch_many(keys, since_map)
         for key in keys:

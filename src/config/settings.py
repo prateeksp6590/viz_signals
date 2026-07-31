@@ -95,9 +95,18 @@ NSE_JSON_PATH = Path(_env(
 
 # ── Engine loop ───────────────────────────────────────────────────────────────
 POLL_INTERVAL_SECS = float(_env('POLL_INTERVAL_SECS', '5'))
-LOOKBACK_MINUTES   = int(_env('LOOKBACK_MINUTES', '60'))
+# Must hold ANGLE_MIN_SAMPLES + ANGLE_N2 ticks even for the SLOWEST instrument.
+# At MCX rates (~0.09 ticks/s) 60 minutes is only ~320 ticks; 180 gives ~970.
+LOOKBACK_MINUTES   = int(_env('LOOKBACK_MINUTES', '180'))
 ENGINE_START       = _env('ENGINE_START', '09:16')   # IST HH:MM
-ENGINE_STOP        = _env('ENGINE_STOP', '15:30')    # IST HH:MM
+ENGINE_STOP        = _env('ENGINE_STOP', '23:30')    # IST HH:MM — MCX runs late
+# Per-exchange close. After its close an instrument is skipped: it cannot tick, so
+# querying it wastes rows and its stale view would keep re-triggering the strategy.
+EXCHANGE_CLOSE = {}
+for _p in _env('EXCHANGE_CLOSE', 'NSE:15:30,BSE:15:30,MCX:23:30').split(','):
+    _bits = _p.split(':')
+    if len(_bits) == 3:
+        EXCHANGE_CLOSE[_bits[0].strip().upper()] = f'{_bits[1]}:{_bits[2]}'
 
 # ── Strategy: slope_angle ─────────────────────────────────────────────────────
 ANGLE_N1             = int(_env('ANGLE_N1', '50'))     # middle point, n-N1
@@ -110,7 +119,11 @@ ANGLE_PRICE_MODE     = _env('ANGLE_PRICE_MODE', 'pct')  # abs (Rs/tick) | pct (%
 # Calibrated 2026-07-29 on BSE SENSEX 77500 CE: q=0.95 held up in both halves of
 # the day (PF 1.82 / 2.01) where q>=0.99 flipped sign between them.
 ANGLE_THRESH_MODE    = _env('ANGLE_THRESH_MODE', 'percentile')  # fixed|percentile|mad
-ANGLE_WINDOW         = int(_env('ANGLE_WINDOW', '2000'))   # ticks in adaptive window
+ANGLE_WINDOW         = int(_env('ANGLE_WINDOW', '2000'))   # CAP on the adaptive window
+# Minimum angle samples before a threshold is trusted. This, not ANGLE_WINDOW, sets
+# the warm-up. MCX options tick ~0.09/s vs NIFTY's 1.5/s, so requiring half of a
+# 2,000 window made them unreachable: LOOKBACK_MINUTES never held that many ticks.
+ANGLE_MIN_SAMPLES    = int(_env('ANGLE_MIN_SAMPLES', '200'))
 ANGLE_Q              = float(_env('ANGLE_Q', '0.95'))      # percentile mode
 ANGLE_MAD_K          = float(_env('ANGLE_MAD_K', '5'))     # mad mode
 
@@ -119,6 +132,22 @@ ANGLE_MAD_K          = float(_env('ANGLE_MAD_K', '5'))     # mad mode
 ANGLE_LONG_ONLY      = _env('ANGLE_LONG_ONLY', 'true').lower() == 'true'
 ANGLE_REQUIRE_CONVEX = _env('ANGLE_REQUIRE_CONVEX', 'true').lower() == 'true'
 ANGLE_EXIT_ON_REVERSE = _env('ANGLE_EXIT_ON_REVERSE', 'true').lower() == 'true'
+
+# ── Exits (live) ─────────────────────────────────────────────────────────────
+# A FIXED % stop cannot work across instruments or regimes. Measured: a 1.5% stop
+# was inside a single tick of noise on SENSEX expiry day (tick p95 = 1.48%) and got
+# stopped out one second before a 108% move; the same 1.5% was fine the day before.
+# Prefer the sigma multiples: stop = K x sigma x sqrt(horizon), computed per
+# instrument at entry. The fixed values are the fallback when sigma is unavailable.
+EXIT_STOP_SIGMA      = float(_env('EXIT_STOP_SIGMA', '1.0'))    # 0 = use EXIT_STOP_PCT
+EXIT_TRAIL_SIGMA     = float(_env('EXIT_TRAIL_SIGMA', '2.0'))   # 0 = use EXIT_TRAIL_PCT
+EXIT_SIGMA_WINDOW    = int(_env('EXIT_SIGMA_WINDOW', '200'))    # ticks
+EXIT_SIGMA_HORIZON   = int(_env('EXIT_SIGMA_HORIZON', '50'))    # ticks
+EXIT_STOP_PCT        = float(_env('EXIT_STOP_PCT', '3.0'))      # fallback
+EXIT_TRAIL_PCT       = float(_env('EXIT_TRAIL_PCT', '6.0'))     # fallback
+EXIT_TRAIL_AFTER_PCT = float(_env('EXIT_TRAIL_AFTER_PCT', '0')) # 0 = same as trail
+EXIT_TARGET_PCT      = float(_env('EXIT_TARGET_PCT', '0'))      # 0 = no cap, let it run
+EXIT_MAX_HOLD_SECS   = float(_env('EXIT_MAX_HOLD_SECS', '900'))
 
 # ── Execution ─────────────────────────────────────────────────────────────────
 ORDER_MODE        = _env('ORDER_MODE', 'paper')      # signals_only | paper | live
@@ -130,7 +159,8 @@ ORDER_QTY_DEFAULT = int(_env('ORDER_QTY_DEFAULT', '1'))
 # silently misprice every trade.
 #   LOTS_BY_UNDERLYING=NIFTY:5,SENSEX:10,CRUDEOILM:1
 LOTS_BY_UNDERLYING = {}
-for _pair in _env('LOTS_BY_UNDERLYING', 'NIFTY:5,SENSEX:10').split(','):
+for _pair in _env('LOTS_BY_UNDERLYING',
+                  'NIFTY:5,SENSEX:10,CRUDEOILM:1,NATURALGAS:1,SILVERM:1').split(','):
     if ':' in _pair:
         _u, _n = _pair.split(':', 1)
         try:
@@ -175,7 +205,7 @@ def validate() -> list[str]:
         errors.append(f'ANGLE_Q must be strictly between 0 and 1 (got {ANGLE_Q})')
     # the adaptive window must actually fit inside the tick history we hold
     if ANGLE_THRESH_MODE != 'fixed':
-        need_ticks = ANGLE_WINDOW + ANGLE_N2 + 1
+        need_ticks = ANGLE_MIN_SAMPLES + ANGLE_N2 + 1
         if LOOKBACK_MINUTES * 60 < need_ticks:      # ~1 tick/sec worst case
             errors.append(
                 f'LOOKBACK_MINUTES={LOOKBACK_MINUTES} may not hold the '

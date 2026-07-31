@@ -23,6 +23,7 @@ class SignalEngine:
         self._tracker = tracker
         self._journal = journal
         self._last_emitted: dict[tuple[str, str], datetime] = {}
+        self._thin_warned: set[str] = set()
 
     def run_cycle(self) -> list[Signal]:
         """Returns eligible signals for this cycle (all raw signals are journaled)."""
@@ -30,6 +31,17 @@ class SignalEngine:
         for key, view in self._market.views.items():
             view.position = self._tracker.get_open(key)
             if view.ticks.empty:
+                continue
+            need = getattr(self._strategy, 'warmup_ticks', 0)
+            if need and len(view.ticks) < need:
+                if key not in self._thin_warned and view.last_ts is not None:
+                    age_min = (view.ticks.index[-1] - view.ticks.index[0]).total_seconds() / 60
+                    if age_min > 90:      # had plenty of wall clock and still too few
+                        self._thin_warned.add(key)
+                        logger.warning(
+                            f'{view.symbol}: only {len(view.ticks)} ticks in '
+                            f'{age_min:.0f} min — needs {need}. Too illiquid for this '
+                            f'strategy; it will not signal.')
                 continue
             try:
                 raw = self._strategy.generate_signals(view) or []

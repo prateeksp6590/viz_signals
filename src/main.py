@@ -9,12 +9,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .config import settings
-from .models import Order, OrderStatus, Side, SignalAction
+from .models import Order, OrderStatus, Side, Signal, SignalAction
 from .services.influx_reader import InfluxReader
 from .services.journal import Journal
 from .services.market_view import MarketData
 from .services.position_tracker import PositionTracker
 from .services.risk_gate import RiskGate
+from .services.exit_manager import ExitManager
 from .services.signal_engine import SignalEngine
 from .services.brokers.paper import PaperBroker
 from .strategies.slope_angle import SlopeAngleStrategy
@@ -71,7 +72,7 @@ def _make_broker():
     return None  # signals_only
 
 
-def _execute(sig, view, broker, tracker, journal) -> None:
+def _execute(sig, view, broker, tracker, journal, exits=None) -> None:
     if sig.action == SignalAction.EXIT:
         pos = tracker.get_open(sig.instrument_key)
         side = Side.SELL if pos.side == 'LONG' else Side.BUY
@@ -93,6 +94,11 @@ def _execute(sig, view, broker, tracker, journal) -> None:
     if fill:
         journal.fill(fill)
         tracker.apply_fill(order, fill)
+        if exits is not None:
+            if sig.action == SignalAction.EXIT:
+                exits.forget(sig.instrument_key)
+            else:
+                exits.plan_for(sig.instrument_key, view)
     else:
         logger.error(f'Order not executed: {order.side.value} {order.symbol} x{order.qty}')
 
@@ -123,6 +129,7 @@ def main():
     tracker = PositionTracker(journal)
     gate    = RiskGate(tracker, journal)
     engine  = SignalEngine(STRATEGY, market, tracker, journal)
+    exits   = ExitManager()
     broker  = _make_broker()
 
     logger.info(f'viz_signals starting — mode={settings.ORDER_MODE} '
@@ -147,7 +154,7 @@ def main():
                     sig = Signal(instrument_key=key, symbol=pos.symbol,
                                  action=SignalAction.EXIT, price=price,
                                  strategy=pos.strategy, reason='EOD flatten')
-                    _execute(sig, view, broker, tracker, journal)
+                    _execute(sig, view, broker, tracker, journal, exits)
         elif broker and broker.mode == 'live' and tracker.open_count:
             logger.warning(f'{tracker.open_count} LIVE position(s) still open — '
                            f'relying on broker intraday auto square-off')
@@ -169,6 +176,26 @@ def main():
             market.refresh()
             t_read = time.monotonic() - cycle_start
             tracker.update_marks(market)
+
+            # Stop / target / trailing — checked every cycle, ahead of new entries.
+            # Without this the only live exit is a reverse bend or the EOD flatten,
+            # which is not the strategy that was backtested.
+            if broker is not None:
+                for _key, _view in market.views.items():
+                    _pos = tracker.get_open(_key)
+                    if _pos is None:
+                        continue
+                    _why = exits.check(_pos, _view.ltp, _now_ist())
+                    if _why:
+                        _sig = Signal(instrument_key=_key, symbol=_pos.symbol,
+                                      action=SignalAction.EXIT, price=_view.ltp,
+                                      strategy=_pos.strategy, reason=f'exit:{_why}')
+                        journal.signal(_sig)
+                        logger.info(f'EXIT {_why} {_pos.symbol} @ {_view.ltp} '
+                                    f'(entry {_pos.avg_entry:.2f}, '
+                                    f'{100*(_view.ltp/_pos.avg_entry-1)*_pos.direction:+.2f}%)')
+                        _execute(_sig, _view, broker, tracker, journal, exits)
+
             _t = time.monotonic()
             cycle_signals = engine.run_cycle()
             t_calc = time.monotonic() - _t
@@ -177,7 +204,7 @@ def main():
                     continue  # signals_only — already journaled
                 if gate.approve(sig):
                     _execute(sig, market.views[sig.instrument_key], broker,
-                             tracker, journal)
+                             tracker, journal, exits)
         except Exception as e:
             logger.error(f'Cycle error: {e}', exc_info=True)
 
