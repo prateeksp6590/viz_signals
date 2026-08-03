@@ -160,10 +160,22 @@ class Notifier:
                   text.encode(), {'Title': 'viz_signals', 'Priority': 'high'})
 
         elif b == 'telegram':
-            _post(f'https://api.telegram.org/bot{settings.TELEGRAM_TOKEN}/sendMessage',
-                  urllib.parse.urlencode({'chat_id': settings.TELEGRAM_CHAT_ID,
-                                          'text': text}).encode(),
-                  {'Content-Type': 'application/x-www-form-urlencoded'})
+            # Telegram can answer HTTP 200 with {"ok": false, ...}. Checking only the
+            # status code makes "sent" mean "accepted by the socket", not "delivered
+            # to a chat" -- so a wrong chat_id looks like success forever.
+            status, body = _post(
+                f'https://api.telegram.org/bot{settings.TELEGRAM_TOKEN}/sendMessage',
+                urllib.parse.urlencode({'chat_id': settings.TELEGRAM_CHAT_ID,
+                                        'text': text}).encode(),
+                {'Content-Type': 'application/x-www-form-urlencoded'})
+            try:
+                payload = json.loads(body)
+            except Exception:
+                payload = {}
+            if payload.get('ok') is False:
+                raise RuntimeError(
+                    f"telegram rejected: {payload.get('description', body[:120])} "
+                    f"(chat_id={settings.TELEGRAM_CHAT_ID})")
 
         elif b == 'whatsapp':
             # Business-initiated => must use an approved template. Variables are
