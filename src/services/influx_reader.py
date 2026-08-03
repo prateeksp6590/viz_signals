@@ -162,6 +162,27 @@ from(bucket: "{_flux_escape(self.bucket_name())}")
         if not batches:
             return {}
 
+        def _one(item):
+            start_i, batch = item
+            wanted = ', '.join(f'"{_flux_escape(m)}"' for m in batch)
+            # no |> sort(): pandas re-sorts below, and sorting across dozens of
+            # measurements server-side is pure overhead.
+            flux = f'''
+from(bucket: "{_flux_escape(self.bucket_name())}")
+  |> range(start: {start_i})
+  |> filter(fn: (r) => contains(value: r._measurement, set: [{wanted}]))
+{self._field_filter()}  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+'''
+            try:
+                df = self._query_api.query_data_frame(flux)
+            except Exception as e:
+                logger.error(f'Batched influx query failed ({len(batch)} measurements, '
+                             f'start {start_i}): {" ".join(str(e).split())[:160]}')
+                return None
+            if isinstance(df, list):
+                df = pd.concat(df, ignore_index=True) if df else pd.DataFrame()
+            return df if (df is not None and not df.empty and '_time' in df.columns) else None
+
         frames = []
         if len(batches) == 1:
             r = _one(batches[0])
