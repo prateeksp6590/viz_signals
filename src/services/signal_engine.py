@@ -24,6 +24,7 @@ class SignalEngine:
         self._journal = journal
         self._last_emitted: dict[tuple[str, str], datetime] = {}
         self._thin_warned: set[str] = set()
+        self._last_eval: dict[str, object] = {}
 
     def run_cycle(self) -> list[Signal]:
         """Returns eligible signals for this cycle (all raw signals are journaled)."""
@@ -32,6 +33,16 @@ class SignalEngine:
             view.position = self._tracker.get_open(key)
             if view.ticks.empty:
                 continue
+            # Evaluate an instrument only when it has actually ticked. The poll loop
+            # now runs every 1-2s, but many instruments tick slower than that, so the
+            # same latest tick was being re-evaluated every cycle and emitting the
+            # SAME signal repeatedly -- 12,080 journal rows on 2026-08-03, most of
+            # them duplicates of a few hundred real triggers.
+            ts = view.last_ts
+            if ts is not None and self._last_eval.get(key) == ts:
+                continue
+            self._last_eval[key] = ts
+
             need = getattr(self._strategy, 'warmup_ticks', 0)
             if need and len(view.ticks) < need:
                 if key not in self._thin_warned and view.last_ts is not None:
