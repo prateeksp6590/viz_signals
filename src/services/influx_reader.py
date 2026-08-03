@@ -113,42 +113,54 @@ from(bucket: "{_flux_escape(self.bucket_name())}")
         if not instrument_keys:
             return {}
         meas_of = {k: self.measurement_name(k) for k in instrument_keys}
-        # Use the OLDEST watermark we have. Requiring *every* instrument to have one
-        # meant a single permanently-quiet leg (an illiquid MCX strike that never
-        # ticks) forced a full LOOKBACK_MINUTES re-fetch of all instruments on every
-        # cycle -- which defeats the point of batching, since InfluxDB bills per query
-        # AND per byte scanned.
-        seen = [since_map[k] for k in instrument_keys if since_map.get(k) is not None]
-        if seen:
-            start = min(seen).astimezone(timezone.utc).isoformat().replace('+00:00', 'Z')
-        else:
-            start = f'-{settings.LOOKBACK_MINUTES}m'      # cold start: no watermarks yet
+        # ── watermark-aware chunking ──────────────────────────────────────────
+        # A single batched query needs ONE range(start:), so the OLDEST watermark in
+        # the batch defines the window for everyone. One thin MCX strike that last
+        # ticked an hour ago therefore makes all 50 instruments re-scan an hour of
+        # data every cycle -- measured at 3.4s per cycle on a LOCAL database.
+        # Group instruments by how fresh their watermark is, so the laggards form
+        # their own small chunk instead of penalising the whole set.
+        cold = f'-{settings.LOOKBACK_MINUTES}m'
+        by_meas_since: dict[str, object] = {}
+        for k in instrument_keys:
+            m = meas_of[k]
+            v = since_map.get(k)
+            # if two keys share a measurement, the older watermark wins (fetch more)
+            if m not in by_meas_since or (v is not None and by_meas_since[m] is not None
+                                          and v < by_meas_since[m]):
+                by_meas_since[m] = v
+            if v is None:
+                by_meas_since[m] = None
 
-        # chunk the measurement set: one giant pivoted query times out.
-        # Run the chunks CONCURRENTLY -- they are independent, and the wall clock is
-        # dominated by the ap-south-1 -> us-east-1 round trip rather than by InfluxDB
-        # compute, so N sequential chunks cost N x latency for no reason.
-        meas_list = sorted(set(meas_of.values()))
+        now = datetime.now(timezone.utc)
+        fresh = [(m, v) for m, v in by_meas_since.items() if v is not None]
+        stale = [m for m, v in by_meas_since.items() if v is None]
+
+        # Split by AGE BAND, not just by count. Chunking on count alone does nothing
+        # when everything fits in one chunk -- the laggard still sets the window.
+        # Bands keep a 60-minute-old MCX strike out of the same query as instruments
+        # that ticked 4 seconds ago.
+        bands = (30, 120, 600, 3600)
+        grouped: dict[int, list] = {}
+        for m, v in fresh:
+            age = (now - v.astimezone(timezone.utc)).total_seconds()
+            b = next((i for i, edge in enumerate(bands) if age <= edge), len(bands))
+            grouped.setdefault(b, []).append((m, v))
+
         chunk = max(1, settings.INFLUX_QUERY_CHUNK)
-        batches = [meas_list[i:i + chunk] for i in range(0, len(meas_list), chunk)]
+        batches: list[tuple[str, list[str]]] = []
+        for b in sorted(grouped):
+            grp = sorted(grouped[b], key=lambda x: x[1])
+            for i in range(0, len(grp), chunk):
+                part = grp[i:i + chunk]
+                st = min(v for _, v in part).astimezone(timezone.utc) \
+                       .isoformat().replace('+00:00', 'Z')
+                batches.append((st, [m for m, _ in part]))
+        for i in range(0, len(stale), chunk):
+            batches.append((cold, stale[i:i + chunk]))
 
-        def _one(batch):
-            wanted = ', '.join(f'"{_flux_escape(m)}"' for m in batch)
-            flux = f"""
-from(bucket: "{_flux_escape(self.bucket_name())}")
-  |> range(start: {start})
-  |> filter(fn: (r) => contains(value: r._measurement, set: [{wanted}]))
-{self._field_filter()}  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-  |> sort(columns: ["_time"])
-"""
-            try:
-                df = self._query_api.query_data_frame(flux)
-            except Exception as e:
-                logger.error(f'Batched influx query failed ({len(batch)} measurements): {e}')
-                return None
-            if isinstance(df, list):
-                df = pd.concat(df, ignore_index=True) if df else pd.DataFrame()
-            return df if (df is not None and not df.empty and '_time' in df.columns) else None
+        if not batches:
+            return {}
 
         frames = []
         if len(batches) == 1:
