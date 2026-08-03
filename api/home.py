@@ -79,14 +79,57 @@ def last_trigger_by_instrument(date: str) -> dict[str, dict]:
     return out
 
 
+def last_known(reader, symbol_map: dict[str, str]) -> dict[str, dict]:
+    """Last price of the DAY per instrument, in one query.
+
+    The rolling lookback is sized for the trend calculation, so after 15:30 it holds
+    nothing for NSE/BSE and every row would show a dash where the closing price
+    belongs. A single `last()` over the session, filtered on the indexed `segment`
+    tag, fills that in for ~the cost of one small query.
+    """
+    keys = settings.ANALYZE_INSTRUMENTS
+    if not keys:
+        return {}
+    segs = sorted({k.split('|', 1)[0] for k in keys})
+    cond = ' or '.join(f'r.segment == "{x}"' for x in segs)
+    day = datetime.now(IST).replace(hour=0, minute=0, second=0, microsecond=0)
+    flux = (f'from(bucket:"{settings.INFLUX_BUCKET}")\n'
+            f'  |> range(start: {day.isoformat()})\n'
+            f'  |> filter(fn: (r) => {cond})\n'
+            f'  |> filter(fn: (r) => r._field == "ltp")\n'
+            f'  |> last()\n'
+            f'  |> keep(columns: ["_measurement", "_value", "_time"])')
+    try:
+        df = reader._query_api.query_data_frame(flux)
+    except Exception:
+        return {}
+    import pandas as pd
+    if isinstance(df, list):
+        df = pd.concat(df, ignore_index=True) if df else pd.DataFrame()
+    if df is None or df.empty or '_measurement' not in df.columns:
+        return {}
+    by_meas = {r['_measurement']: {'ltp': float(r['_value']),
+                                   't': pd.to_datetime(r['_time'], utc=True).to_pydatetime()}
+               for _, r in df.iterrows()}
+    out = {}
+    for k in keys:
+        m = reader.measurement_name(k)
+        if m in by_meas:
+            out[k] = by_meas[m]
+    return out
+
+
 def build_rows(reader, symbol_map: dict[str, str], lookback_min: int = 30) -> list[dict]:
     now_utc = datetime.now(timezone.utc)
     keys = settings.ANALYZE_INSTRUMENTS
     got = reader.fetch_many(keys, {k: now_utc - timedelta(minutes=lookback_min) for k in keys})
     date = datetime.now(IST).strftime('%Y%m%d')
 
+    lastk = last_known(reader, symbol_map)
     marks = {k: float(df['ltp'].iloc[-1]) for k, df in got.items()
              if not df.empty and 'ltp' in df}
+    for k, v in lastk.items():                 # mark closed positions at the close
+        marks.setdefault(k, v['ltp'])
     pnl = pnl_by_instrument(date, marks)
     trig = last_trigger_by_instrument(date)
 
@@ -96,11 +139,15 @@ def build_rows(reader, symbol_map: dict[str, str], lookback_min: int = 30) -> li
         sym = symbol_map.get(k, k)
         exch = k.split('|', 1)[0].split('_', 1)[0]
         has = df is not None and not df.empty and 'ltp' in df
-        age = (now_utc - df.index[-1].to_pydatetime()).total_seconds() if has else None
+        lk = lastk.get(k)
+        age = ((now_utc - df.index[-1].to_pydatetime()).total_seconds() if has
+               else (now_utc - lk['t']).total_seconds() if lk else None)
         row = {'sr': i, 'key': k, 'symbol': sym, 'segment': k.split('|', 1)[0],
                'status': 'live' if (age is not None and age <= LIVE_SECS) else 'not live',
                'age_s': round(age, 1) if age is not None else None,
-               'ltp': None, 'ltq': None, 'vtt': None,
+               'ltp': lk['ltp'] if lk else None,      # closing price when not live
+               'ltq': None, 'vtt': None,
+               'stale': not has and lk is not None,
                'trend': {'level': 0, 'label': 'Neutral', 'ready': False},
                'trigger': trig.get(k),
                'pnl': pnl.get(k, {'realised': 0.0, 'open': 0.0, 'total': 0.0, 'open_qty': 0})

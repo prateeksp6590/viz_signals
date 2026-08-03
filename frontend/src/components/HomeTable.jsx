@@ -29,6 +29,8 @@ export default function HomeTable({ home, bars }) {
           <tbody>
             {rows.map(r => {
               // the websocket bar is fresher than the 5s REST poll
+              // websocket bar > 5s poll > day close. A stale price is dimmed and
+              // labelled 'close' so it is never mistaken for a live quote.
               const ltp = bars[r.key]?.c ?? r.ltp
               const p = r.pnl?.total
               const trig = r.trigger
@@ -45,7 +47,11 @@ export default function HomeTable({ home, bars }) {
                          style={{ width: 6, height: 6 }} />{r.status}
                     </span>
                   </td>
-                  <td className="n">{fmt(ltp)}</td>
+                  <td className={`n ${r.stale && !bars[r.key] ? 'mut' : ''}`}
+                      title={r.stale && !bars[r.key] ? 'session close — not a live quote' : ''}>
+                    {fmt(ltp)}{r.stale && !bars[r.key] &&
+                      <span style={{ fontSize: 10, marginLeft: 4, opacity: .7 }}>close</span>}
+                  </td>
                   <td className="n hide-s mut">{r.ltq == null ? '—' : Math.round(r.ltq)}</td>
                   <td className="n hide-s mut">{compact(r.vtt)}</td>
                   <td><Trend t={r.trend} /></td>
