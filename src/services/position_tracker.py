@@ -12,9 +12,43 @@ class PositionTracker:
         self._journal = journal
         self._open: dict[str, Position] = {}
         self.closed: list[Position] = []
-        self.daily_realized: float = 0.0
+        self.daily_realized: float = self._restore_daily_realized()
 
     # ── queries ───────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _restore_daily_realized() -> float:
+        """Re-read today's realised P&L from the journal at startup.
+
+        daily_realized used to live only in memory, so every `systemctl restart`
+        reset it to zero — and with it the DAILY_LOSS_LIMIT. On 2026-08-03 the
+        service was restarted six times and realised P&L reached -39,269 against a
+        -10,000 limit that was, technically, never breached by any single process.
+        """
+        import json
+        from datetime import datetime, timedelta, timezone
+        from pathlib import Path
+        from ..config import settings
+        ist = timezone(timedelta(hours=5, minutes=30))
+        f = (Path(settings.JOURNAL_DIR) / datetime.now(ist).strftime('%Y%m%d')
+             / 'positions.jsonl')
+        if not f.exists():
+            return 0.0
+        total = 0.0
+        try:
+            for line in f.read_text(encoding='utf-8').splitlines():
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                if r.get('event') == 'close' and r.get('realized_pnl') is not None:
+                    total += float(r['realized_pnl'])
+        except Exception as e:
+            logger.warning(f'could not restore today\'s realised P&L: {e}')
+            return 0.0
+        if total:
+            logger.warning(f'Restored realised P&L from journal: {total:+.2f} — '
+                           f'the daily loss limit continues from here, not from zero')
+        return total
 
     def get_open(self, instrument_key: str) -> Position | None:
         return self._open.get(instrument_key)

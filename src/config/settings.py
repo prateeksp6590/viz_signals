@@ -218,6 +218,10 @@ TWILIO_TOKEN = _env('TWILIO_TOKEN', '')
 TWILIO_FROM  = _env('TWILIO_FROM', 'whatsapp:+14155238886')
 TWILIO_TO    = _env('TWILIO_TO', '')
 
+# ── Live stream (display only — the engine always reads raw ticks) ───────────
+STREAM_BAR_SECS  = int(_env('STREAM_BAR_SECS', '30'))
+STREAM_RAW_TICKS = _env('STREAM_RAW_TICKS', 'false').lower() == 'true'
+
 # ── Persistence ───────────────────────────────────────────────────────────────
 PERSIST_TO_INFLUX = _env('PERSIST_TO_INFLUX', 'true').lower() == 'true'
 JOURNAL_DIR       = Path(_env('JOURNAL_DIR', str(REPO_ROOT / 'journal')))

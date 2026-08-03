@@ -83,6 +83,9 @@ def _execute(sig, view, broker, tracker, journal, exits=None) -> None:
         # lots x lot_size from the instrument master, per underlying
         qty, why = quantity_for(sig.instrument_key, sig.symbol)
         qty = sig.qty or qty
+        if not qty:
+            logger.error(f'SKIPPING {sig.symbol}: {why}')
+            return
         logger.debug(f'size {sig.symbol}: {why}')
 
     order = Order(

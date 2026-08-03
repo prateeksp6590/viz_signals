@@ -204,3 +204,81 @@ def adaptive_threshold_latest(angle, mode: str = 'percentile', window: int = 200
         mad = float(np.median(np.abs(past - med)))
         th = med + k * 1.4826 * mad
     return max(th, floor) if floor else th
+
+
+# ── Trend classification (display) ────────────────────────────────────────────
+# Direction is not the same question as a trigger. The strategy fires on a BEND;
+# the table answers "which way has this been going, and how convincingly". Both are
+# derived from slope_recent so the table can never disagree with the signals about
+# which way price is moving.
+#
+# A level is decided by three things measured over `window` ticks:
+#   persistence  fraction of ticks whose recent slope is positive
+#   ret_pct      net % move across the window
+#   move_z       that move measured in random-walk sigmas:
+#                  ret_pct / (per-tick sigma% * sqrt(window))
+#
+# move_z, not acceleration, decides 'Strong'. Median |slope| second-half-vs-first was
+# tried first and does not discriminate: on synthetic data a FLAT rise scored 1.10 and
+# a BUILDING rise 1.02, because |slope| is dominated by tick noise rather than drift.
+# move_z asks the honest question -- is this move larger than this instrument's own
+# noise would produce by chance -- and separates them cleanly.
+#
+# Windows differ per exchange because tick rates do: ~200 ticks is about two minutes
+# on NIFTY but over half an hour on a thin MCX strike.
+
+TREND_LABELS = {2: 'Strong Bullish', 1: 'Bullish', 0: 'Neutral',
+                -1: 'Bearish', -2: 'Strong Bearish'}
+
+
+def trend(prices, window: int = 200, n1: int = N1_DEFAULT, n2: int = N2_DEFAULT,
+          price_mode: str = 'pct', strong: float = 0.80, weak: float = 0.60,
+          strong_z: float = 1.5) -> dict:
+    """Classify recent direction into one of five levels.
+
+    Returns level (-2..2), label, and the three components, so the UI can show a
+    tooltip explaining WHY something is 'Strong Bullish' rather than asking the user
+    to trust a badge.
+    """
+    p = np.asarray(prices, dtype=float)
+    need = window + n2 + 1
+    if p.size < n2 + 2:
+        return {'level': 0, 'label': TREND_LABELS[0], 'persistence': None,
+                'ret_pct': None, 'accel': None, 'n': int(p.size), 'ready': False}
+
+    r = angle_series(p[-need:], n1, n2, price_mode)
+    sl = r['slope_recent']
+    sl = sl[np.isfinite(sl)]
+    if sl.size < 10:
+        return {'level': 0, 'label': TREND_LABELS[0], 'persistence': None,
+                'ret_pct': None, 'accel': None, 'n': int(sl.size), 'ready': False}
+    sl = sl[-window:]
+
+    persistence = float(np.mean(sl > 0))
+    span = min(window, p.size - 1)
+    ret_pct = float((p[-1] / p[-1 - span] - 1) * 100) if p[-1 - span] else 0.0
+
+    seg = p[-1 - span:]
+    rets = np.diff(seg) / seg[:-1] * 100.0
+    sigma = float(np.std(rets)) if rets.size > 2 else 0.0
+    expected = sigma * np.sqrt(max(1, span))          # random-walk drift over the window
+    move_z = float(ret_pct / expected) if expected > 1e-9 else 0.0
+
+    half = max(2, sl.size // 2)
+    a1 = float(np.median(np.abs(sl[:half]))) or 1e-12
+    accel = float(np.median(np.abs(sl[half:])) / a1)   # diagnostic only
+
+    if persistence >= strong and move_z >= strong_z:
+        lvl = 2
+    elif persistence >= weak and ret_pct > 0:
+        lvl = 1
+    elif persistence <= (1 - strong) and move_z <= -strong_z:
+        lvl = -2
+    elif persistence <= (1 - weak) and ret_pct < 0:
+        lvl = -1
+    else:
+        lvl = 0
+
+    return {'level': lvl, 'label': TREND_LABELS[lvl], 'persistence': round(persistence, 3),
+            'ret_pct': round(ret_pct, 3), 'move_z': round(move_z, 2),
+            'accel': round(accel, 3), 'n': int(sl.size), 'ready': True}

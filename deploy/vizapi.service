@@ -1,0 +1,26 @@
+# /etc/systemd/system/vizapi.service
+[Unit]
+Description=viz_signals API (REST + live WebSocket)
+After=network-online.target influxdb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/viz_signals
+EnvironmentFile=/home/ubuntu/viz_signals/.env
+# 127.0.0.1 only: reachable over Tailscale/SSH, never from the public internet.
+ExecStart=/home/ubuntu/viz_signals/.venv/bin/uvicorn api.main:app \
+          --host 127.0.0.1 --port 8000 --workers 1
+MemoryMax=500M
+CPUQuota=60%
+Nice=8
+OOMScoreAdjust=550
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vizapi
+
+[Install]
+WantedBy=multi-user.target

@@ -38,13 +38,37 @@ def _master_index() -> dict:
     return out
 
 
+def underlying_candidates(instrument_key: str, symbol: str = '') -> list[str]:
+    """Every plausible name for the underlying, best guess first.
+
+    MCX options are written on a FUTURES contract, so `underlying_symbol` is that
+    contract (e.g. 'CRUDEOILM 17AUG26'), not the commodity — which is why
+    LOTS_BY_UNDERLYING['CRUDEOILM'] never matched and sizing fell back to
+    ORDER_QTY_DEFAULT=1. At qty 1 no move can cover the ~Rs 48 round-trip cost, so
+    every MCX trade on 2026-08-03 was a guaranteed loss.
+    """
+    out, info = [], _master_index().get(instrument_key)
+    if info:
+        out.append(info['underlying'])
+    for src in (info['symbol'] if info else '', symbol):
+        m = re.match(r'^([A-Z&]+)', (src or '').upper())
+        if m:
+            out.append(m.group(1))          # leading word: 'CRUDEOILM 7650 CE ...'
+    seen, uniq = set(), []
+    for x in out:
+        x = (x or '').strip().upper()
+        if x and x not in seen:
+            seen.add(x); uniq.append(x)
+    return uniq
+
+
 def underlying_of(instrument_key: str, symbol: str = '') -> str:
-    info = _master_index().get(instrument_key)
-    if info and info['underlying']:
-        return info['underlying']
-    # fall back to the leading word of a trading symbol: 'SENSEX 77500 CE 06 AUG 26'
-    m = re.match(r'^([A-Z&]+)', (symbol or '').upper())
-    return m.group(1) if m else ''
+    """The candidate that LOTS_BY_UNDERLYING actually knows, else the first."""
+    cands = underlying_candidates(instrument_key, symbol)
+    for c in cands:
+        if c in settings.LOTS_BY_UNDERLYING:
+            return c
+    return cands[0] if cands else ''
 
 
 def lot_size_of(instrument_key: str) -> int:
@@ -53,12 +77,19 @@ def lot_size_of(instrument_key: str) -> int:
 
 
 def quantity_for(instrument_key: str, symbol: str = '') -> tuple[int, str]:
-    """(quantity, explanation). Falls back to ORDER_QTY_DEFAULT when unmapped."""
+    """(quantity, explanation). Returns 0 when the instrument cannot be sized.
+
+    0 means DO NOT TRADE. Guessing a quantity is worse than skipping: an unsized
+    trade still pays full brokerage and STT, so it is negative-expectancy by
+    construction regardless of whether the signal was right.
+    """
     u = underlying_of(instrument_key, symbol)
     lots = settings.LOTS_BY_UNDERLYING.get(u)
     ls = lot_size_of(instrument_key)
     if lots and ls:
         return lots * ls, f'{lots} lot x {ls} = {lots * ls}'
     if lots and not ls:
-        return settings.ORDER_QTY_DEFAULT, f'{u}: lot_size unknown (master missing?)'
-    return settings.ORDER_QTY_DEFAULT, f'{u or "?"}: no LOTS_BY_UNDERLYING entry'
+        return 0, (f'{u}: lot_size missing from the instrument master — refusing to '
+                   f'size (is data/{instrument_key.split("_")[0]}.json current?)')
+    return 0, (f'{u or "?"}: no LOTS_BY_UNDERLYING entry '
+               f'(tried {underlying_candidates(instrument_key, symbol)})')
