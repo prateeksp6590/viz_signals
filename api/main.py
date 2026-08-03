@@ -20,6 +20,7 @@ Endpoints
 import json
 import os
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -46,7 +47,6 @@ from src.utils.sizing import quantity_for, underlying_of
 IST = timezone(timedelta(hours=5, minutes=30))
 STATIC = Path(__file__).parent / 'static'
 
-app = FastAPI(title='viz_signals API', version='0.1')
 _hub: Hub | None = None
 _symbol_map: dict[str, str] = {}
 
@@ -66,8 +66,10 @@ def _load_symbol_map() -> dict[str, str]:
     return out
 
 
-@app.on_event('startup')
-async def _startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup/shutdown. `@app.on_event` was removed in Starlette 1.x — this is the
+    supported form and works on both old and new versions."""
     global _hub, _symbol_map
     _symbol_map = _load_symbol_map()
     _hub = Hub(_symbol_map, interval=float(settings.POLL_INTERVAL_SECS or 1),
@@ -75,12 +77,14 @@ async def _startup():
                raw_ticks=settings.STREAM_RAW_TICKS)
     await _hub.start()
     logger.info(f'API up — {len(_symbol_map)} instruments, hub every {_hub._interval}s')
+    try:
+        yield
+    finally:
+        if _hub:
+            await _hub.stop()
 
 
-@app.on_event('shutdown')
-async def _shutdown():
-    if _hub:
-        await _hub.stop()
+app = FastAPI(title='viz_signals API', version='0.1', lifespan=lifespan)
 
 
 def _reader() -> InfluxReader:
