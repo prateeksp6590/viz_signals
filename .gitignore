@@ -7,7 +7,8 @@ KILL_SWITCH
 venv/
 
 # generated backtest artifacts / local data
-*.html
+# only the generated backtest charts — NOT frontend/index.html, which Vite requires
+triggers_*.html
 out/
 *.csv
 .pytest_cache/

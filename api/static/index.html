@@ -1,0 +1,105 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>viz_signals — live</title>
+<style>
+ :root{color-scheme:dark}
+ body{font:14px/1.5 system-ui,-apple-system,sans-serif;margin:0;padding:12px;
+      background:#0d1117;color:#e6edf3}
+ h1{font-size:15px;margin:0 0 10px;font-weight:600}
+ .bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
+ .pill{background:#161b22;border:1px solid #30363d;border-radius:99px;padding:3px 10px;font-size:12px}
+ .ok{color:#3fb950} .bad{color:#f85149}
+ table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+ th,td{text-align:left;padding:5px 8px;border-bottom:1px solid #21262d;font-size:13px}
+ th{color:#8b949e;font-weight:500;position:sticky;top:0;background:#0d1117}
+ td.n{text-align:right}
+ .up{color:#3fb950} .dn{color:#f85149}
+ .sig{background:#1c2128;border-left:3px solid #3fb950;padding:6px 10px;margin:4px 0;
+      border-radius:0 4px 4px 0;font-size:13px}
+ @media(max-width:600px){ .hide-s{display:none} }
+</style>
+
+<h1>viz_signals — live</h1>
+<div class="bar">
+  <span class="pill">ws <b id="ws" class="bad">connecting…</b></span>
+  <span class="pill">instruments <b id="ni">—</b></span>
+  <span class="pill">bar updates/s <b id="tps">0</b></span>
+  <span class="pill">signals <b id="ns">0</b></span>
+</div>
+
+<table>
+  <thead><tr><th>Instrument</th><th class="n">LTP</th><th class="n hide-s">Δ</th>
+             <th class="n hide-s">30s O/H/L</th><th class="n hide-s">bars</th>
+      <th class="n">updated</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<h1 style="margin-top:18px">Signals</h1>
+<div id="sigs"></div>
+
+<script>
+const rows = {}, tbody = document.getElementById('rows');
+let tickCount = 0, sigCount = 0;
+setInterval(() => { document.getElementById('tps').textContent = tickCount; tickCount = 0; }, 1000);
+
+// A bar arrives repeatedly while it is forming (closed:false) and once more when it
+// closes. Count only the closed ones so the tally is bars, not updates.
+function upsert(t) {
+  let r = rows[t.key];
+  if (!r) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${t.symbol}</td><td class="n v">–</td>
+                    <td class="n d hide-s">–</td><td class="n ohl hide-s">–</td>
+                    <td class="n c hide-s">0</td><td class="n u">–</td>`;
+    tbody.appendChild(tr);
+    r = rows[t.key] = {tr, prev: null, n: 0};
+  }
+  if (t.closed) r.n++;
+  const v = r.tr.querySelector('.v'), d = r.tr.querySelector('.d');
+  v.textContent = t.c.toFixed(2);
+  if (r.prev !== null) {
+    const diff = t.c - r.prev;
+    d.textContent = (diff >= 0 ? '+' : '') + diff.toFixed(2);
+    d.className = 'n d hide-s ' + (diff >= 0 ? 'up' : 'dn');
+  }
+  if (t.closed) r.prev = t.c;             // compare bar-close to bar-close
+  else if (r.prev === null) r.prev = t.o;
+  r.tr.querySelector('.ohl').textContent =
+      `${t.o.toFixed(1)}/${t.h.toFixed(1)}/${t.l.toFixed(1)}`;
+  r.tr.querySelector('.c').textContent = r.n;
+  const u = r.tr.querySelector('.u');
+  u.textContent = t.t.slice(11, 19) + (t.closed ? '' : ' •');
+}
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const s = new WebSocket(`${proto}://${location.host}/ws`);
+  s.onopen = () => { const e = document.getElementById('ws');
+                     e.textContent = 'live'; e.className = 'ok'; };
+  s.onclose = () => { const e = document.getElementById('ws');
+                      e.textContent = 'reconnecting…'; e.className = 'bad';
+                      setTimeout(connect, 2000); };          // survive sleep/wake on phone
+  s.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'hello') {
+      document.getElementById('ni').textContent = m.instruments;
+      document.title = `viz_signals — ${m.bar_secs}s bars`;
+    }
+    else if (m.type === 'bars') { m.data.forEach(upsert); tickCount += m.data.length; }
+    else if (m.type === 'ticks') { tickCount += m.data.length; }
+    else if (m.type === 'signal') {
+      sigCount++; document.getElementById('ns').textContent = sigCount;
+      const d = document.createElement('div');
+      d.className = 'sig';
+      d.textContent = `${m.data.t.slice(11,19)}  ${m.data.action}  ${m.data.symbol}` +
+        `  @ ${m.data.price}` +
+        (m.data.angle ? `  angle ${m.data.angle.toFixed(2)} ≥ ${m.data.threshold.toFixed(2)}` : '');
+      const box = document.getElementById('sigs');
+      box.prepend(d);
+      while (box.children.length > 40) box.lastChild.remove();
+    }
+  };
+}
+connect();
+</script>
