@@ -1,0 +1,5 @@
+This directory holds the BUILT React bundle and is committed deliberately.
+EC2 has no node/npm — the API serves these files directly, so the build happens on
+the laptop and the output ships through git. Regenerate with:
+    cd frontend && npm run build
+then commit whatever changes under api/static/app/.
