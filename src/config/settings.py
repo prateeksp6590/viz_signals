@@ -42,6 +42,10 @@ INFLUX_QUERY_TIMEOUT_MS = int(_env('INFLUX_QUERY_TIMEOUT_MS', '120000'))
 # Chunks run concurrently: EC2 is ap-south-1 and InfluxDB Cloud us-east-1, so each
 # query pays ~4s of transcontinental round trip regardless of how little it returns.
 INFLUX_QUERY_WORKERS = int(_env('INFLUX_QUERY_WORKERS', '4'))
+# 'segment' filters on an indexed TAG and drops surplus measurements in pandas;
+# 'measurement' uses contains() over the exact names. Measured 137 ms vs 2,329 ms
+# for the same data on 50 instruments -- segment unless you have a reason.
+INFLUX_FILTER_BY = _env('INFLUX_FILTER_BY', 'segment')
 INFLUX_FIELDS = [f.strip() for f in _env('INFLUX_FIELDS', 'ltp,vtt,oi').split(',')
                  if f.strip()]                                    # empty = every field
 

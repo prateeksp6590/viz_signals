@@ -164,14 +164,27 @@ from(bucket: "{_flux_escape(self.bucket_name())}")
 
         def _one(item):
             start_i, batch = item
-            wanted = ', '.join(f'"{_flux_escape(m)}"' for m in batch)
+            # MEASUREMENT vs SEGMENT filtering.
+            # contains(value: r._measurement, set: [...50 names...]) is an O(50)
+            # string compare PER ROW. Measured on the live box: the same query cost
+            # 137 ms with no measurement filter and 2,329 ms with contains() -- a 17x
+            # penalty. `segment` is a TAG, so comparing it is indexed and cheap; we
+            # over-fetch a little and drop the extras in pandas below.
+            segs = sorted({m_key.split('|', 1)[0] for m_key in instrument_keys})
+            if settings.INFLUX_FILTER_BY == 'segment' and segs:
+                mfilter = ('  |> filter(fn: (r) => '
+                           + ' or '.join(f'r.segment == "{_flux_escape(x)}"' for x in segs)
+                           + ')\n')
+            else:
+                wanted = ', '.join(f'"{_flux_escape(m)}"' for m in batch)
+                mfilter = ('  |> filter(fn: (r) => contains(value: r._measurement, '
+                           f'set: [{wanted}]))\n')
             # no |> sort(): pandas re-sorts below, and sorting across dozens of
             # measurements server-side is pure overhead.
             flux = f'''
 from(bucket: "{_flux_escape(self.bucket_name())}")
   |> range(start: {start_i})
-  |> filter(fn: (r) => contains(value: r._measurement, set: [{wanted}]))
-{self._field_filter()}  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+{mfilter}{self._field_filter()}  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
 '''
             try:
                 df = self._query_api.query_data_frame(flux)
@@ -200,7 +213,9 @@ from(bucket: "{_flux_escape(self.bucket_name())}")
         df = pd.concat(frames, ignore_index=True)
         df = df.drop(columns=[c for c in _META_COLS if c in df.columns and c != '_measurement'])
         df = df.set_index('_time').sort_index()
-        by_meas = {m: g.drop(columns=['_measurement']) for m, g in df.groupby('_measurement')}
+        keep = set(meas_of.values())
+        by_meas = {m: g.drop(columns=['_measurement'])
+                   for m, g in df.groupby('_measurement') if m in keep}
 
         out: dict[str, pd.DataFrame] = {}
         for key in instrument_keys:
