@@ -1,0 +1,24 @@
+# /etc/systemd/system/vizmcx.service
+[Unit]
+Description=viz_signals MCX poller (REST quotes, 5-min signals)
+After=network-online.target influxdb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/viz_signals
+EnvironmentFile=/home/ubuntu/viz_signals/.env
+ExecStart=/home/ubuntu/viz_signals/.venv/bin/python -m mcx.poller
+MemoryMax=300M
+CPUQuota=30%
+Nice=10
+OOMScoreAdjust=600
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vizmcx
+
+[Install]
+WantedBy=multi-user.target

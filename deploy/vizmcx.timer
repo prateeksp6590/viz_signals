@@ -1,0 +1,13 @@
+# /etc/systemd/system/vizmcx.timer
+# 09:05 — before the 09:09 prep job, because this reads MCX.json from the PREVIOUS
+# download and does its own liquidity discovery; it does not need today's chain.
+[Unit]
+Description=Start the MCX poller on trading days
+
+[Timer]
+OnCalendar=Mon..Fri 09:05 Asia/Kolkata
+Persistent=false
+Unit=vizmcx.service
+
+[Install]
+WantedBy=timers.target
