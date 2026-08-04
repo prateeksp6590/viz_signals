@@ -25,10 +25,18 @@ export default defineConfig({
   build: { outDir: '../api/static/app', emptyOutDir: true },
   server: {
     port: 5173,
-    // dev: laptop runs Vite, API stays on EC2 through the SSH tunnel
+    host: true,                      // reachable from the iPad on the same network
+    // Dev runs Vite on the laptop while the API stays on EC2. Point VITE_API at the
+    // Tailscale address to skip the SSH tunnel entirely:
+    //   VITE_API=http://100.111.169.115:8000 npm run dev
+    // Defaults to localhost:8000, which is the tunnel.
     proxy: {
-      '/api': 'http://localhost:8000',
-      '/ws': { target: 'ws://localhost:8000', ws: true }
+      '/api': process.env.VITE_API || 'http://localhost:8000',
+      '/ws': {
+        target: (process.env.VITE_API || 'http://localhost:8000')
+          .replace(/^http/, 'ws'),
+        ws: true
+      }
     }
   }
 })

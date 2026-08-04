@@ -159,7 +159,11 @@ def ticks(key: str, minutes: int = Query(60, ge=1, le=1440),
             return {'key': key, 'bars': []}
         o = df['ltp'].resample(bucket).ohlc().dropna(how='all')
         if 'vtt' in df:
-            o['volume'] = df['vtt'].resample(bucket).last().diff().clip(lower=0)
+            v = df['vtt'].resample(bucket).last()
+            o['vtt'] = v.reindex(o.index)                    # cumulative, as stored
+            o['volume'] = v.diff().clip(lower=0).reindex(o.index)   # per-bar
+        if 'ltq' in df:
+            o['ltq'] = df['ltq'].resample(bucket).mean().reindex(o.index)
         o = o.reset_index()
         o['_time'] = o['_time'].dt.tz_convert(IST).astype(str)
         return {'key': key, 'symbol': _symbol_map.get(key, key),

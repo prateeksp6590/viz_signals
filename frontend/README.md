@@ -5,14 +5,21 @@ and UI: no CORS, no second web server to run or secure.
 
 ## Develop (laptop)
 
-Keep the SSH tunnel open so the API is on localhost:8000, then:
+Over Tailscale — no tunnel needed:
 
-```bash
-cd frontend && npm install && npm run dev      # http://localhost:5173
+```powershell
+$env:VITE_API="http://100.111.169.115:8000"; npm run dev
 ```
 
-Vite proxies `/api` and `/ws` to the tunnel, so you get hot reload against **live EC2
-data** without deploying.
+Or through an SSH tunnel (`-L 8000:localhost:8000`), where the default applies:
+
+```bash
+npm install && npm run dev      # http://localhost:5173
+```
+
+Either way you get hot reload against **live EC2 data** without deploying. `host: true`
+means the dev server is also reachable from the iPad on the same network, which is the
+quickest way to check a layout change on the real screen.
 
 ## Deploy
 
