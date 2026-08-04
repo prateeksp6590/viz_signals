@@ -57,7 +57,11 @@ POLL_MINS = float(_env('MCX_POLL_MINS', '2'))
 BAR_MINS = float(_env('MCX_BAR_MINS', '5'))
 UNDERLYINGS = [x.strip().upper() for x in
                _env('MCX_UNDERLYINGS', 'CRUDEOILM,NATURALGAS,SILVERM').split(',') if x.strip()]
-TOP_K = int(_env('MCX_TOP_K', '4'))          # liquid strikes kept per underlying
+TOP_K = int(_env('MCX_TOP_K', '4'))          # MAX liquid strikes kept per underlying
+# A floor, because TOP_K alone forced four picks even when only two strikes traded:
+# discovery on 2026-08-04 selected SILVERM 260000 PE (volume 19) and 265000 CE
+# (volume 9). Polling those costs quota and can never produce a usable signal.
+MIN_VOLUME = int(_env('MCX_MIN_VOLUME', '2000'))
 RANGE = int(_env('MCX_DISCOVER_RANGE', '6'))  # ATM +/- this many, before ranking
 N1 = int(_env('MCX_N1', '5'))
 N2 = int(_env('MCX_N2', '8'))
@@ -163,10 +167,12 @@ def discover(master: list, token: str) -> dict[str, str]:
     """
     chosen = {}
     for und in UNDERLYINGS:
+        # Match on the TRADING SYMBOL prefix, not asset_symbol. NATGASMINI shares
+        # NATURALGAS as its asset, so an asset-level match silently mixed a different
+        # contract (different lot size, different tick) into the same underlying.
         rows = [r for r in master
                 if r.get('instrument_type') in ('CE', 'PE')
-                and und in (str(r.get('name', '')).upper(),
-                            str(r.get('asset_symbol', '')).upper())
+                and str(r.get('trading_symbol', '')).upper().startswith(und + ' ')
                 and r.get('expiry') and r.get('strike_price')]
         if not rows:
             logger.warning(f'{und}: no option rows in MCX.json')
@@ -184,13 +190,21 @@ def discover(master: list, token: str) -> dict[str, str]:
                 if abs(strikes.index(float(r['strike_price'])) - strikes.index(mid)) <= RANGE]
         q = quote([r['instrument_key'] for r in near], token)
         ranked = sorted(near, key=lambda r: -(q.get(r['instrument_key'], {}).get('volume') or 0))
+        kept = 0
         for r in ranked[:TOP_K]:
             v = q.get(r['instrument_key'], {}).get('volume') or 0
+            if v < MIN_VOLUME:
+                logger.info(f"  {und}: skipping {r['trading_symbol']} — volume {v:,} "
+                            f"< MCX_MIN_VOLUME {MIN_VOLUME:,}")
+                continue
             chosen[r['instrument_key']] = r['trading_symbol']
+            kept += 1
             logger.info(f"  {und}: {r['trading_symbol']}  volume {v:,}")
+        if not kept:
+            logger.warning(f'{und}: no strike cleared MCX_MIN_VOLUME — options skipped')
         # the underlying future too — it leads the options
         fut = [r for r in master if r.get('instrument_type') == 'FUT'
-               and und in (str(r.get('name', '')).upper(), str(r.get('asset_symbol', '')).upper())]
+               and str(r.get('trading_symbol', '')).upper().startswith(und + ' ')]
         if fut:
             f = sorted(fut, key=lambda r: int(r.get('expiry') or 0))[0]
             chosen[f['instrument_key']] = f['trading_symbol']
@@ -243,8 +257,10 @@ def main():
     logger.info(f'polling {len(keys)} instrument(s) every {POLL_MINS}min, '
                 f'signals every {BAR_MINS}min  (n1={N1} n2={N2} q={Q})')
 
-    from src.config.influx import client
-    write_api = client.write_api(write_options=SYNCHRONOUS)
+    from influxdb_client import InfluxDBClient
+    influx = InfluxDBClient(url=settings.INFLUX_URL, token=settings.INFLUX_TOKEN,
+                            org=settings.INFLUX_ORG, timeout=30_000)
+    write_api = influx.write_api(write_options=SYNCHRONOUS)
     notifier = Notifier()
     hist: dict[str, list] = {}
     last_sig: dict[str, datetime] = {}
@@ -308,6 +324,10 @@ def main():
             time.sleep(1)
 
     notifier.close()
+    try:
+        influx.close()
+    except Exception:
+        pass
     logger.info('mcx poller stopped')
 
 
