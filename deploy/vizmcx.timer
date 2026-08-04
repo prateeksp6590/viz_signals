@@ -1,11 +1,12 @@
 # /etc/systemd/system/vizmcx.timer
-# 09:05 — before the 09:09 prep job, because this reads MCX.json from the PREVIOUS
-# download and does its own liquidity discovery; it does not need today's chain.
+# 09:12 — AFTER the 09:09 prep job. The poller needs a valid Upstox token, and prep
+# is what mints today's. It will also wait and retry if started early, but starting
+# after prep avoids burning the first minutes of the session on retries.
 [Unit]
 Description=Start the MCX poller on trading days
 
 [Timer]
-OnCalendar=Mon..Fri 09:05 Asia/Kolkata
+OnCalendar=Mon..Fri 09:12 Asia/Kolkata
 Persistent=false
 Unit=vizmcx.service
 

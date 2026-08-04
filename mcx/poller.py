@@ -79,9 +79,54 @@ def _now():
 
 
 def _token():
+    """Read the Upstox token from the FEEDER's .env, freshly, every time.
+
+    Two reasons this is not cached:
+      1. The token lives in viz_hedge/.env — auto_token.py writes it there and this
+         repo has no business owning a second copy that can drift.
+      2. This service starts at 09:05 but prep does not mint the day's token until
+         ~09:09. Re-reading each poll means the refresh is picked up automatically
+         instead of the process running all session on an expired credential.
+    """
     from dotenv import dotenv_values
-    return (dotenv_values(ROOT / '.env').get('UPSTOX_ACCESS_TOKEN')
-            or os.getenv('UPSTOX_ACCESS_TOKEN'))
+    for path in (settings.FEEDER_ENV, ROOT / '.env'):
+        try:
+            v = dotenv_values(path).get('UPSTOX_ACCESS_TOKEN')
+            if v and v.strip():
+                return v.strip()
+        except Exception:
+            pass
+    return os.getenv('UPSTOX_ACCESS_TOKEN')
+
+
+def _token_valid(tok: str | None) -> bool:
+    if not tok:
+        return False
+    try:
+        r = requests.get('https://api.upstox.com/v2/user/profile',
+                         headers={'Authorization': f'Bearer {tok}',
+                                  'Accept': 'application/json'}, timeout=10)
+        return r.ok
+    except Exception:
+        return False
+
+
+def _wait_for_token(deadline_mins: int = 25) -> str:
+    """Poll for a working token. Prep runs at ~09:09; we start at 09:05."""
+    waited = 0
+    while waited < deadline_mins * 60:
+        tok = _token()
+        if _token_valid(tok):
+            if waited:
+                logger.info(f'token became valid after {waited}s')
+            return tok
+        if waited == 0:
+            logger.warning(f'no valid Upstox token yet in {settings.FEEDER_ENV} — '
+                           f'waiting for the prep job to mint today\'s (checks every 30s)')
+        time.sleep(30)
+        waited += 30
+    sys.exit(f'no valid token after {deadline_mins} min — check: '
+             f'journalctl -u vizhedge-prep --since today')
 
 
 def load_master() -> list:
@@ -178,9 +223,6 @@ def write_points(write_api, quotes: dict, symbols: dict[str, str]) -> int:
 
 
 def main():
-    token = _token()
-    if not token:
-        sys.exit('UPSTOX_ACCESS_TOKEN not set')
     start, stop = _hhmm(START, dt_time(9, 5)), _hhmm(STOP, dt_time(23, 35))
     now = _now()
     if now.time() >= stop:
@@ -191,6 +233,7 @@ def main():
         logger.info(f'waiting {wait:.0f}s until {START} IST')
         time.sleep(wait)
 
+    token = _wait_for_token()
     master = load_master()
     logger.info(f'discovering liquid strikes for {UNDERLYINGS} (top {TOP_K} by volume)')
     symbols = discover(master, token)
@@ -212,7 +255,13 @@ def main():
     next_bar = time.monotonic() + BAR_MINS * 60
     while not stopping['v'] and _now().time() < stop:
         t0 = time.monotonic()
-        q = quote(keys, token)
+        tok = _token() or token
+        q = quote(keys, tok)
+        if not q:                                   # every call failed — likely a 401
+            if not _token_valid(tok):
+                logger.warning('token rejected mid-session — waiting for a refresh')
+                token = _wait_for_token(deadline_mins=10)
+                q = quote(keys, token)
         n = write_points(write_api, q, symbols)
         for k, v in q.items():
             if v.get('last_price') is not None:
