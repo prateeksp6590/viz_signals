@@ -262,7 +262,14 @@ def main():
                             org=settings.INFLUX_ORG, timeout=30_000)
     write_api = influx.write_api(write_options=SYNCHRONOUS)
     notifier = Notifier()
-    hist: dict[str, list] = {}
+
+    # Seed from InfluxDB so a restart does not cost another 98 minutes of warm-up.
+    # At 2-minute sampling the first signal needs N2 + 1 + MIN_SAMPLES = 49 samples;
+    # without this, every `systemctl restart` blinds the strategy until ~11:00.
+    hist: dict[str, list] = _bootstrap(influx, symbols)
+    seeded = sum(1 for v in hist.values() if len(v) >= N2 + 1 + MIN_SAMPLES)
+    logger.info(f'seeded history for {len(hist)} instrument(s); '
+                f'{seeded} already past warm-up')
     last_sig: dict[str, datetime] = {}
     stopping = {'v': False}
     _signal.signal(_signal.SIGTERM, lambda *_: stopping.update(v=True))
@@ -329,6 +336,32 @@ def main():
     except Exception:
         pass
     logger.info('mcx poller stopped')
+
+
+def _bootstrap(influx, symbols: dict[str, str]) -> dict[str, list]:
+    """Reload today's samples for each instrument from InfluxDB."""
+    need = WINDOW + N2 + 5
+    day = _now().replace(hour=0, minute=0, second=0, microsecond=0)
+    out: dict[str, list] = {}
+    qa = influx.query_api()
+    for key, sym in symbols.items():
+        meas = f'MCX_{sym}'
+        flux = (f'from(bucket:"{settings.INFLUX_BUCKET}")\n'
+                f'  |> range(start: {day.isoformat()})\n'
+                f'  |> filter(fn: (r) => r._measurement == "{meas}" and r._field == "ltp")\n'
+                f'  |> sort(columns:["_time"])\n'
+                f'  |> tail(n: {need})')
+        try:
+            df = qa.query_data_frame(flux)
+        except Exception as e:
+            logger.warning(f'bootstrap {sym}: {" ".join(str(e).split())[:120]}')
+            continue
+        if isinstance(df, list):
+            df = pd.concat(df, ignore_index=True) if df else pd.DataFrame()
+        if df is None or df.empty or '_value' not in df.columns:
+            continue
+        out[key] = [float(v) for v in df['_value'].tolist()]
+    return out
 
 
 def _journal(sig: Signal) -> None:
