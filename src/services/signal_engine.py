@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from ..config import settings
 from ..models import Signal, SignalAction
+from ..utils.moneyness import classify
 from ..utils.logger import logger
 from .market_view import MarketData
 from .position_tracker import PositionTracker
@@ -24,12 +25,28 @@ class SignalEngine:
         self._journal = journal
         self._last_emitted: dict[tuple[str, str], datetime] = {}
         self._thin_warned: set[str] = set()
+        self._mny_warned: set[str] = set()
         self._last_eval: dict[str, object] = {}
 
     def run_cycle(self) -> list[Signal]:
         """Returns eligible signals for this cycle (all raw signals are journaled)."""
         eligible: list[Signal] = []
+
+        # Moneyness is recomputed every cycle from live premiums, so it follows spot
+        # instead of being fixed at chain-generation time.
+        mny = {}
+        if settings.ANALYZE_MONEYNESS:
+            mny = classify({k: (v.symbol, v.ltp) for k, v in self._market.views.items()})
+
         for key, view in self._market.views.items():
+            if mny:
+                cls = mny.get(key, 'UNKNOWN')
+                if cls not in settings.ANALYZE_MONEYNESS and cls != 'UNKNOWN':
+                    if key not in self._mny_warned:
+                        self._mny_warned.add(key)
+                        logger.info(f'{view.symbol}: {cls} — not traded '
+                                    f'(ANALYZE_MONEYNESS={",".join(settings.ANALYZE_MONEYNESS)})')
+                    continue
             view.position = self._tracker.get_open(key)
             if view.ticks.empty:
                 continue

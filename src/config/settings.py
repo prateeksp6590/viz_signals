@@ -87,6 +87,15 @@ if FOLLOW_FEEDER == 'always' or (FOLLOW_FEEDER == 'auto' and not ANALYZE_INSTRUM
 # Use ANALYZE_SEGMENTS=ALL to disable the filter. An EMPTY value will not work:
 # _env() treats empty as unset and hands back the default.
 _seg_raw = _env('ANALYZE_SEGMENTS', 'NSE_FO,BSE_FO,MCX_FO')
+# Which moneyness to TRADE. ITM legs were the whole of 2026-08-04's loss: high
+# premium, low gamma, thin books, big tickets. The feeder still STORES them (the data
+# is worth keeping) — this only stops the strategy acting on them.
+# 'ALL' disables the filter. UNKNOWN is always allowed so a parse failure never
+# silently mutes an instrument.
+_mny_raw = _env('ANALYZE_MONEYNESS', 'ATM,OTM')
+ANALYZE_MONEYNESS = ([] if _mny_raw.strip().upper() in ('ALL', '*')
+                     else [x.strip().upper() for x in _mny_raw.split(',') if x.strip()])
+
 ANALYZE_SEGMENTS = ([] if _seg_raw.strip().upper() in ('ALL', '*')
                     else [x.strip().upper() for x in _seg_raw.split(',') if x.strip()])
 if ANALYZE_SEGMENTS:
@@ -143,7 +152,10 @@ ANGLE_EXIT_ON_REVERSE = _env('ANGLE_EXIT_ON_REVERSE', 'true').lower() == 'true'
 # stopped out one second before a 108% move; the same 1.5% was fine the day before.
 # Prefer the sigma multiples: stop = K x sigma x sqrt(horizon), computed per
 # instrument at entry. The fixed values are the fallback when sigma is unavailable.
-EXIT_STOP_SIGMA      = float(_env('EXIT_STOP_SIGMA', '1.0'))    # 0 = use EXIT_STOP_PCT
+# Raised 1.0 -> 4.0 on 2026-08-05. Two independent sessions showed every trade
+# stopped inside 30s was a loser (11 trades, 0% win on 08-04; 24 trades, 0% on 08-03)
+# while trades surviving past 10 minutes won ~50-57%. The stop was inside the noise.
+EXIT_STOP_SIGMA      = float(_env('EXIT_STOP_SIGMA', '4.0'))    # 0 = use EXIT_STOP_PCT
 EXIT_TRAIL_SIGMA     = float(_env('EXIT_TRAIL_SIGMA', '2.0'))   # 0 = use EXIT_TRAIL_PCT
 EXIT_SIGMA_WINDOW    = int(_env('EXIT_SIGMA_WINDOW', '200'))    # ticks
 EXIT_SIGMA_HORIZON   = int(_env('EXIT_SIGMA_HORIZON', '50'))    # ticks

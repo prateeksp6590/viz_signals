@@ -14,6 +14,7 @@ import numpy as np
 
 from src.config import settings
 from src.strategies.angle_math import trend
+from src.utils.moneyness import classify
 from src.utils.sizing import quantity_for, underlying_of
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -132,6 +133,14 @@ def build_rows(reader, symbol_map: dict[str, str], lookback_min: int = 30) -> li
     date = datetime.now(IST).strftime('%Y%m%d')
 
     lastk = last_known(reader, symbol_map)
+    # classify from the freshest premium available (live tick, else the close)
+    _px = {}
+    for k in keys:
+        df = got.get(k)
+        v = (float(df['ltp'].iloc[-1]) if df is not None and not df.empty and 'ltp' in df
+             else (lastk.get(k) or {}).get('ltp'))
+        _px[k] = (symbol_map.get(k, k), v)
+    mny = classify(_px)
     marks = {k: float(df['ltp'].iloc[-1]) for k, df in got.items()
              if not df.empty and 'ltp' in df}
     for k, v in lastk.items():                 # mark closed positions at the close
@@ -169,6 +178,10 @@ def build_rows(reader, symbol_map: dict[str, str], lookback_min: int = 30) -> li
                'pnl': pnl.get(k, {'realised': 0.0, 'open': 0.0, 'total': 0.0, 'open_qty': 0})
                       if k in pnl else None,
                'qty': quantity_for(k, sym)[0],
+               'moneyness': mny.get(k, 'UNKNOWN'),
+               'traded': mny.get(k, 'UNKNOWN') in settings.ANALYZE_MONEYNESS
+                         or not settings.ANALYZE_MONEYNESS
+                         or mny.get(k) == 'UNKNOWN',
                'underlying': underlying_of(k, sym)}
         if has:
             row['ltp'] = float(df['ltp'].iloc[-1])

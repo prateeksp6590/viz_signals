@@ -35,9 +35,15 @@ export default function HomeTable({ home, bars }) {
               const p = r.pnl?.total
               const trig = r.trigger
               return (
-                <tr key={r.key}>
+                <tr key={r.key} style={r.traded ? undefined : { opacity: .45 }}
+                    title={r.traded ? undefined
+                      : `${r.moneyness} — stored but not traded (ANALYZE_MONEYNESS)`}>
                   <td className="mut">{r.sr}</td>
-                  <td>{r.symbol}</td>
+                  <td>{r.symbol}
+                    {r.moneyness && r.moneyness !== 'UNKNOWN' &&
+                      <span className="mut" style={{ fontSize: 10, marginLeft: 6 }}>
+                        {r.moneyness}</span>}
+                  </td>
                   <td>
                     <span className="pill" style={{
                       background: r.status === 'live' ? 'rgba(63,185,80,.12)' : 'rgba(139,148,158,.15)',
