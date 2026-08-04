@@ -101,6 +101,7 @@ def health():
             'clients': _hub.n_clients if _hub else 0,
             'hub_error': _hub.last_error if _hub else None,
             'bucket': settings.INFLUX_BUCKET, 'mode': settings.ORDER_MODE,
+            'stale_bundle': _stale_bundle(),
             'now': datetime.now(IST).isoformat()}
 
 
@@ -269,6 +270,30 @@ if STATIC.exists():
     app.mount('/static', StaticFiles(directory=STATIC), name='static')
 
 APP_DIR = STATIC / 'app'
+
+
+def _stale_bundle() -> str | None:
+    """Is the built bundle older than the source it was built from?
+
+    api/static/app is a build artifact committed to git. Editing frontend/src does
+    nothing until `npm run build` runs, and the failure is silent — the dashboard
+    simply keeps showing the old behaviour. Surfacing it in /api/health turns a
+    confusing 'my change did not appear' into a one-line answer.
+    """
+    src = APP_DIR.parent.parent.parent / 'frontend' / 'src'
+    idx = APP_DIR / 'index.html'
+    if not src.exists() or not idx.exists():
+        return None
+    newest = max((f.stat().st_mtime for f in src.rglob('*') if f.is_file()), default=0)
+    if newest > idx.stat().st_mtime + 5:
+        from datetime import datetime as _dt
+        return (f'frontend/src changed at '
+                f'{_dt.fromtimestamp(newest, IST):%Y-%m-%d %H:%M} but the bundle was '
+                f'built at {_dt.fromtimestamp(idx.stat().st_mtime, IST):%Y-%m-%d %H:%M} '
+                f'— run: cd frontend && npm run build')
+    return None
+
+
 if APP_DIR.exists():
     # html=True makes any unknown path fall back to index.html, which a single-page
     # app needs so a deep link or a PWA cold start does not 404.

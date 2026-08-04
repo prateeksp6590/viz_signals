@@ -16,10 +16,19 @@ data** without deploying.
 
 ## Deploy
 
+`api/static/app` is a COMMITTED BUILD ARTIFACT. Editing `src/` changes nothing until
+you rebuild — and the failure is silent, the dashboard just keeps its old behaviour.
+
 ```bash
-npm run build                 # -> ../api/static/app
-sudo systemctl restart vizapi
+cd frontend && npm run build          # -> ../api/static/app
+cd .. && git add -A                   # from the PARENT: output is outside frontend/
+git commit -m "rebuild frontend" && git push
+# on EC2:
+git pull && sudo systemctl restart vizapi
 ```
+
+`/api/health` returns `stale_bundle` with a message whenever `src/` is newer than the
+built `index.html`, so a forgotten rebuild shows up as a fact rather than a mystery.
 
 Then `http://<tailscale-ip>:8000/` redirects to `/app/`. On iPad, Share → **Add to Home
 Screen** installs it: fullscreen, own icon, no address bar.
