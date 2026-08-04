@@ -76,13 +76,33 @@ def lot_size_of(instrument_key: str) -> int:
     return info['lot_size'] if info else 0
 
 
-def quantity_for(instrument_key: str, symbol: str = '') -> tuple[int, str]:
+def is_equity(instrument_key: str) -> bool:
+    return instrument_key.split('|', 1)[0].upper().endswith('_EQ')
+
+
+def quantity_for(instrument_key: str, symbol: str = '',
+                 price: float | None = None) -> tuple[int, str]:
     """(quantity, explanation). Returns 0 when the instrument cannot be sized.
 
     0 means DO NOT TRADE. Guessing a quantity is worse than skipping: an unsized
     trade still pays full brokerage and STT, so it is negative-expectancy by
     construction regardless of whether the signal was right.
     """
+    if is_equity(instrument_key):
+        # MIS margin is ~1/5th of notional, so size by capital deployed rather than
+        # a share count — otherwise a Rs 200 stock and a Rs 14,000 stock would carry
+        # wildly different risk for the same 'quantity'.
+        if not price or price <= 0:
+            return 0, f'{symbol or instrument_key}: no price, cannot size equity'
+        notional = settings.EQUITY_MARGIN_PER_TRADE * settings.EQUITY_LEVERAGE
+        qty = int(notional // price)
+        if qty <= 0:
+            return 0, (f'{symbol}: Rs {notional:,.0f} notional buys 0 shares '
+                       f'at {price:,.2f}')
+        qty = min(qty, settings.EQUITY_MAX_QTY)
+        return qty, (f'Rs {settings.EQUITY_MARGIN_PER_TRADE:,.0f} x'
+                     f'{settings.EQUITY_LEVERAGE:g} / {price:,.2f} = {qty}')
+
     u = underlying_of(instrument_key, symbol)
     lots = settings.LOTS_BY_UNDERLYING.get(u)
     ls = lot_size_of(instrument_key)

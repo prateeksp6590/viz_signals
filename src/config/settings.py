@@ -98,6 +98,20 @@ ANALYZE_MONEYNESS = ([] if _mny_raw.strip().upper() in ('ALL', '*')
 
 ANALYZE_SEGMENTS = ([] if _seg_raw.strip().upper() in ('ALL', '*')
                     else [x.strip().upper() for x in _seg_raw.split(',') if x.strip()])
+
+# WHAT THE DASHBOARD SHOWS is a different question from WHAT THE STRATEGY TRADES.
+# Equities stream into the same bucket and are worth watching, but slope_angle was
+# never calibrated on them; MCX is handled by its own poller and deliberately stays
+# off the frontend. Keeping one list for both meant you could not watch something
+# without also trading it.
+_all_instruments = list(ANALYZE_INSTRUMENTS)
+_disp_raw = _env('DISPLAY_SEGMENTS', 'NSE_FO,BSE_FO,NSE_EQ')
+DISPLAY_SEGMENTS = ([] if _disp_raw.strip().upper() in ('ALL', '*')
+                    else [x.strip().upper() for x in _disp_raw.split(',') if x.strip()])
+DISPLAY_INSTRUMENTS = ([k for k in _all_instruments
+                        if k.split('|', 1)[0].upper() in DISPLAY_SEGMENTS]
+                       if DISPLAY_SEGMENTS else list(_all_instruments))
+
 if ANALYZE_SEGMENTS:
     ANALYZE_INSTRUMENTS = [k for k in ANALYZE_INSTRUMENTS
                            if k.split('|', 1)[0].upper() in ANALYZE_SEGMENTS]
@@ -143,6 +157,22 @@ ANGLE_MAD_K          = float(_env('ANGLE_MAD_K', '5'))     # mad mode
 # Long-only: buy CE on an upward bend. Downside is captured by running the same
 # signal on the PE, not by shorting.
 ANGLE_LONG_ONLY      = _env('ANGLE_LONG_ONLY', 'true').lower() == 'true'
+
+# Shorting is a per-SEGMENT capability. Options stay long-only (the downside is
+# expressed by buying the PE); equities can be sold intraday under MIS, so a downward
+# bend is directly tradeable and restricting them to long discards half the signals.
+SHORT_SEGMENTS       = [x.strip().upper() for x in
+                        _env('SHORT_SEGMENTS', 'NSE_EQ,BSE_EQ').split(',') if x.strip()]
+
+# Equity intraday sizing. MIS margin is ~1/5th of notional, so a rupee of capital
+# controls 5x the stock. Size by CAPITAL DEPLOYED, not a share count — otherwise a
+# Rs 85 stock and a Rs 14,000 stock carry wildly different risk at the same 'quantity'.
+#   qty = floor(EQUITY_MARGIN_PER_TRADE * EQUITY_LEVERAGE / ltp)
+# Leverage cuts both ways: the same % move is 5x the rupee P&L, so DAILY_LOSS_LIMIT
+# is reached far faster once equities trade.
+EQUITY_MARGIN_PER_TRADE = float(_env('EQUITY_MARGIN_PER_TRADE', '50000'))
+EQUITY_LEVERAGE         = float(_env('EQUITY_LEVERAGE', '5'))
+EQUITY_MAX_QTY          = int(_env('EQUITY_MAX_QTY', '10000'))
 ANGLE_REQUIRE_CONVEX = _env('ANGLE_REQUIRE_CONVEX', 'true').lower() == 'true'
 ANGLE_EXIT_ON_REVERSE = _env('ANGLE_EXIT_ON_REVERSE', 'true').lower() == 'true'
 

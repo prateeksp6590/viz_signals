@@ -28,15 +28,20 @@ from src.utils.sizing import lot_size_of, quantity_for, underlying_of  # noqa: E
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-# Indicative F&O option charges (buy+sell, % of turnover unless stated).
-# Order matters less than transparency: every component is shown so you can
-# substitute your broker's actual slab.
-BROKERAGE_PER_ORDER = 20.0      # flat, per executed order
-STT_SELL_PREMIUM    = 0.0625 / 100      # options: on sell-side premium
-EXCH_TXN            = 0.05 / 100        # NSE/BSE F&O options, both sides
-SEBI_FEE            = 10 / 1e7
-STAMP_BUY           = 0.003 / 100       # buy side only
-GST                 = 0.18              # on brokerage + txn + sebi
+# Indicative charges. Equity intraday and F&O options are taxed DIFFERENTLY — STT is
+# 0.025% of equity turnover on the sell side versus 0.0625% of option PREMIUM, and the
+# exchange transaction charge differs by an order of magnitude. Using one model for
+# both would badly misstate equity P&L, especially at 5x leverage where turnover is
+# large relative to the move. Every component is shown so you can substitute your
+# broker's actual slab.
+GST = 0.18                       # on brokerage + txn + sebi
+SEBI_FEE = 10 / 1e7
+
+OPT = dict(brokerage=20.0, stt_sell=0.0625 / 100, txn=0.05 / 100, stamp_buy=0.003 / 100)
+EQ_INTRADAY = dict(brokerage=20.0,               # or 0.03% if lower, at most brokers
+                   stt_sell=0.025 / 100,         # equity intraday, sell side
+                   txn=0.00297 / 100,            # NSE cash
+                   stamp_buy=0.003 / 100)
 
 
 def _read(p: Path) -> list:
@@ -52,13 +57,15 @@ def _read(p: Path) -> list:
     return out
 
 
-def charges(entry_px: float, exit_px: float, qty: int) -> dict:
+def charges(entry_px: float, exit_px: float, qty: int, equity: bool = False) -> dict:
+    m = EQ_INTRADAY if equity else OPT
     buy_val, sell_val = entry_px * qty, exit_px * qty
-    brok = BROKERAGE_PER_ORDER * 2
-    txn = (buy_val + sell_val) * EXCH_TXN
-    stt = sell_val * STT_SELL_PREMIUM
+    brok = min(m['brokerage'], 0.0003 * buy_val) + min(m['brokerage'], 0.0003 * sell_val) \
+        if equity else m['brokerage'] * 2
+    txn = (buy_val + sell_val) * m['txn']
+    stt = sell_val * m['stt_sell']
     sebi = (buy_val + sell_val) * SEBI_FEE
-    stamp = buy_val * STAMP_BUY
+    stamp = buy_val * m['stamp_buy']
     gst = (brok + txn + sebi) * GST
     return {'brokerage': brok, 'txn': txn, 'stt': stt, 'sebi': sebi,
             'stamp': stamp, 'gst': gst,
@@ -95,12 +102,13 @@ def main() -> int:
     rows, per_u = [], defaultdict(lambda: {'n': 0, 'gross': 0.0, 'chg': 0.0})
     for p in closed:
         key, sym = p.get('instrument_key', ''), p.get('symbol', '')
-        qty = int(p.get('qty') or 0) or quantity_for(key, sym)[0]
         entry, exit_ = float(p['avg_entry']), float(p['exit_price'])
+        qty = int(p.get('qty') or 0) or quantity_for(key, sym, entry)[0]
         direction = 1 if p.get('side') == 'LONG' else -1
         # journal realized_pnl is per the qty actually tracked; re-price on `qty`
         gross = (exit_ - entry) * direction * qty
-        c = {'total': 0.0} if args.no_charges else charges(entry, exit_, qty)
+        is_eq = key.split('|', 1)[0].upper().endswith('_EQ')
+        c = {'total': 0.0} if args.no_charges else charges(entry, exit_, qty, is_eq)
         u = underlying_of(key, sym)
         per_u[u]['n'] += 1
         per_u[u]['gross'] += gross
@@ -134,8 +142,10 @@ def main() -> int:
     print(f"\n  win rate {100 * wins / len(rows):.0f}% ({wins}/{len(rows)})   "
           f"charges are {100 * c / abs(g) if g else 0:.1f}% of gross")
     if not args.no_charges:
-        print('  charges: Rs20/order brokerage, 0.0625% STT on sell premium, 0.05% txn, '
-              '0.003% stamp (buy), 18% GST. Substitute your broker\'s slab.')
+        print('  options : Rs20/order, 0.0625% STT on sell premium, 0.05% txn, '
+              '0.003% stamp (buy), 18% GST')
+        print('  equity  : Rs20 or 0.03% per order (lower), 0.025% STT on sell turnover, '
+              '0.00297% txn, 0.003% stamp (buy), 18% GST')
     print()
     return 0
 

@@ -81,7 +81,7 @@ def _execute(sig, view, broker, tracker, journal, exits=None) -> None:
     else:
         side = Side.BUY if sig.action == SignalAction.ENTER_LONG else Side.SELL
         # lots x lot_size from the instrument master, per underlying
-        qty, why = quantity_for(sig.instrument_key, sig.symbol)
+        qty, why = quantity_for(sig.instrument_key, sig.symbol, sig.price)
         qty = sig.qty or qty
         if not qty:
             logger.error(f'SKIPPING {sig.symbol}: {why}')

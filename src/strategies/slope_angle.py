@@ -114,7 +114,17 @@ class SlopeAngleStrategy(Strategy):
 
         up = bool(is_upward_bend(r['slope_base'][-1:], r['slope_full'][-1:],
                                  r['slope_recent'][-1:], self.require_convex)[0])
-        if self.long_only and not up:
+        # Shorting is allowed per SEGMENT: equities can be sold intraday, options
+        # cannot (the downside is expressed by buying the PE instead).
+        from ..config import settings as _s
+        seg = view.instrument_key.split('|', 1)[0].upper()
+        can_short = seg in _s.SHORT_SEGMENTS
+        if self.long_only and not up and not can_short:
+            return []
+        if not up and not can_short:
+            return []
+        # a downward bend only qualifies as a short if it is genuinely falling
+        if not up and r['slope_recent'][-1] >= 0:
             return []
         if not up and r['slope_recent'][-1] == 0:
             return []

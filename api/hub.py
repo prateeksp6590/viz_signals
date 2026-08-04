@@ -81,7 +81,7 @@ class Hub:
         self._reader.close()
 
     async def _loop(self) -> None:
-        keys = settings.ANALYZE_INSTRUMENTS
+        keys = settings.DISPLAY_INSTRUMENTS
         while True:
             try:
                 if self._subs:                       # no clients -> no queries

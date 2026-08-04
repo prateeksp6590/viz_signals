@@ -94,7 +94,7 @@ def last_known(reader, symbol_map: dict[str, str]) -> dict[str, dict]:
     belongs. A single `last()` over the session, filtered on the indexed `segment`
     tag, fills that in for ~the cost of one small query.
     """
-    keys = settings.ANALYZE_INSTRUMENTS
+    keys = settings.DISPLAY_INSTRUMENTS
     if not keys:
         return {}
     segs = sorted({k.split('|', 1)[0] for k in keys})
@@ -128,7 +128,7 @@ def last_known(reader, symbol_map: dict[str, str]) -> dict[str, dict]:
 
 def build_rows(reader, symbol_map: dict[str, str], lookback_min: int = 30) -> list[dict]:
     now_utc = datetime.now(timezone.utc)
-    keys = settings.ANALYZE_INSTRUMENTS
+    keys = settings.DISPLAY_INSTRUMENTS
     got = reader.fetch_many(keys, {k: now_utc - timedelta(minutes=lookback_min) for k in keys})
     date = datetime.now(IST).strftime('%Y%m%d')
 
@@ -179,9 +179,12 @@ def build_rows(reader, symbol_map: dict[str, str], lookback_min: int = 30) -> li
                       if k in pnl else None,
                'qty': quantity_for(k, sym)[0],
                'moneyness': mny.get(k, 'UNKNOWN'),
-               'traded': mny.get(k, 'UNKNOWN') in settings.ANALYZE_MONEYNESS
-                         or not settings.ANALYZE_MONEYNESS
-                         or mny.get(k) == 'UNKNOWN',
+               'traded': (k in settings.ANALYZE_INSTRUMENTS
+                          and (not settings.ANALYZE_MONEYNESS
+                               or mny.get(k, 'UNKNOWN') in settings.ANALYZE_MONEYNESS
+                               or mny.get(k) == 'UNKNOWN')),
+               'why_not': (None if k in settings.ANALYZE_INSTRUMENTS
+                           else 'watch only'),
                'underlying': underlying_of(k, sym)}
         if has:
             row['ltp'] = float(df['ltp'].iloc[-1])

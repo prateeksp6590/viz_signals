@@ -37,12 +37,16 @@ export default function HomeTable({ home, bars }) {
               return (
                 <tr key={r.key} style={r.traded ? undefined : { opacity: .45 }}
                     title={r.traded ? undefined
-                      : `${r.moneyness} — stored but not traded (ANALYZE_MONEYNESS)`}>
+                      : (r.why_not === 'watch only'
+                         ? 'watch only — not traded by the strategy'
+                         : `${r.moneyness} — stored but not traded`)}>
                   <td className="mut">{r.sr}</td>
                   <td>{r.symbol}
-                    {r.moneyness && r.moneyness !== 'UNKNOWN' &&
-                      <span className="mut" style={{ fontSize: 10, marginLeft: 6 }}>
-                        {r.moneyness}</span>}
+                    {r.why_not === 'watch only'
+                      ? <span className="mut" style={{ fontSize: 10, marginLeft: 6 }}>watch</span>
+                      : r.moneyness && r.moneyness !== 'UNKNOWN' &&
+                        <span className="mut" style={{ fontSize: 10, marginLeft: 6 }}>
+                          {r.moneyness}</span>}
                   </td>
                   <td>
                     <span className="pill" style={{

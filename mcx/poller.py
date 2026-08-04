@@ -294,24 +294,39 @@ def main():
 
         if time.monotonic() >= next_bar:
             next_bar = time.monotonic() + BAR_MINS * 60
+            # Diagnostics on every bar. Without this, "no signals" is indistinguishable
+            # from warming up, from a threshold nothing reaches, from every bend being
+            # downward — and you cannot tune what you cannot see.
+            need = N2 + 1 + MIN_SAMPLES
+            warm = fired = down = 0
+            best = (0.0, '', 0.0, 0.0)          # ratio, symbol, angle, threshold
             for k, series in hist.items():
-                if len(series) < N2 + 1 + MIN_SAMPLES:
+                if len(series) < need:
                     continue
+                warm += 1
                 r = angle_series(np.asarray(series, float), N1, N2, 'pct')
                 ang = r['angle_deg']
                 if ang.size == 0:
                     continue
                 thr = adaptive_threshold_latest(ang, 'percentile', WINDOW, Q,
                                                 min_periods=MIN_SAMPLES)
-                if thr is None or thr != thr or ang[-1] < thr:
+                if thr is None or thr != thr or thr <= 0:
                     continue
-                if not bool(is_upward_bend(r['slope_base'][-1:], r['slope_full'][-1:],
-                                           r['slope_recent'][-1:], True)[0]):
+                ratio = float(ang[-1] / thr)
+                up = bool(is_upward_bend(r['slope_base'][-1:], r['slope_full'][-1:],
+                                         r['slope_recent'][-1:], True)[0])
+                if ratio > best[0]:
+                    best = (ratio, symbols.get(k, k), float(ang[-1]), float(thr))
+                if ang[-1] < thr:
+                    continue
+                if not up:
+                    down += 1
                     continue
                 prev = last_sig.get(k)
                 if prev and (_now() - prev).total_seconds() < BAR_MINS * 60 * 2:
                     continue
                 last_sig[k] = _now()
+                fired += 1
                 sig = Signal(instrument_key=k, symbol=symbols[k],
                              action=SignalAction.ENTER_LONG, price=series[-1],
                              strategy='mcx_slope_angle',
@@ -323,6 +338,13 @@ def main():
                 logger.info(f'MCX SIGNAL {sig.symbol} @ {sig.price} — {sig.reason}')
                 notifier.notify(sig)
                 _journal(sig)
+
+            samples = max((len(v) for v in hist.values()), default=0)
+            logger.info(
+                f'bar eval: {warm}/{len(hist)} warm (need {need}, have {samples}), '
+                f'{fired} fired, {down} bent down; '
+                + (f'best {best[1][:28]} {best[2]:.2f}/{best[3]:.2f} = {best[0]:.2f}x'
+                   if best[1] else 'nothing measurable yet'))
 
         sleep = max(5.0, POLL_MINS * 60 - (time.monotonic() - t0))
         for _ in range(int(sleep)):

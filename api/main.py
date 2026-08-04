@@ -52,7 +52,7 @@ _symbol_map: dict[str, str] = {}
 
 
 def _load_symbol_map() -> dict[str, str]:
-    keys, out = set(settings.ANALYZE_INSTRUMENTS), {}
+    keys, out = set(settings.DISPLAY_INSTRUMENTS), {}
     for ex in ('NSE', 'BSE', 'MCX'):
         p = settings.NSE_JSON_PATH.parent / f'{ex}.json'
         if not p.exists():
@@ -109,9 +109,9 @@ def instruments(minutes: int = Query(1440, ge=1, le=10080)):
     r = _reader()
     try:
         now = datetime.now(timezone.utc)
-        got = r.fetch_many(settings.ANALYZE_INSTRUMENTS,
+        got = r.fetch_many(settings.DISPLAY_INSTRUMENTS,
                            {k: now - timedelta(minutes=minutes)
-                            for k in settings.ANALYZE_INSTRUMENTS})
+                            for k in settings.DISPLAY_INSTRUMENTS})
         out = []
         for k, df in got.items():
             if df.empty or 'ltp' not in df:
