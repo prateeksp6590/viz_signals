@@ -28,6 +28,20 @@ from src.utils.sizing import lot_size_of, quantity_for, underlying_of  # noqa: E
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+
+def _ist_hms(ts: str) -> str:
+    """Journal timestamps are UTC. Slicing the ISO string (ts[11:19]) prints UTC
+    and silently mislabels every exit by 5h30m -- a 09:30 IST exit reads 04:00."""
+    if not ts:
+        return ''
+    try:
+        d = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+    except ValueError:
+        return ts[11:19]
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.astimezone(IST).strftime('%H:%M:%S')
+
 # Indicative charges. Equity intraday and F&O options are taxed DIFFERENTLY — STT is
 # 0.025% of equity turnover on the sell side versus 0.0625% of option PREMIUM, and the
 # exchange transaction charge differs by an order of magnitude. Using one model for
@@ -117,7 +131,7 @@ def main() -> int:
                      'lots': qty // (lot_size_of(key) or qty or 1),
                      'entry': entry, 'exit': exit_, 'gross': gross,
                      'chg': c['total'], 'net': gross - c['total'],
-                     't': p.get('exit_ts', '')[11:19]})
+                     't': _ist_hms(p.get('exit_ts', ''))})
 
     print(f"  {'EXIT':<9}{'INSTRUMENT':<30}{'SIDE':<6}{'LOTS':>5}{'QTY':>7}"
           f"{'ENTRY':>9}{'EXIT':>9}{'GROSS':>11}{'CHG':>9}{'NET':>11}")

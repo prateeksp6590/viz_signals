@@ -173,6 +173,16 @@ SHORT_SEGMENTS       = [x.strip().upper() for x in
 EQUITY_MARGIN_PER_TRADE = float(_env('EQUITY_MARGIN_PER_TRADE', '50000'))
 EQUITY_LEVERAGE         = float(_env('EQUITY_LEVERAGE', '5'))
 EQUITY_MAX_QTY          = int(_env('EQUITY_MAX_QTY', '10000'))
+
+# --- profile D: risk-per-trade gates (0 disables either one) -------------------
+# Fixed lots make risk proportional to premium: on 2026-08-04 notional ran from
+# Rs 2,000 to Rs 122,331 for the same "5 lots / 10 lots". The four trades above
+# Rs 100k lost Rs 14,792 gross; everything else together made +3,590.
+MAX_NOTIONAL_PER_TRADE = float(_env('MAX_NOTIONAL_PER_TRADE', '0'))
+# Below this premium a round trip cannot pay for itself: 14 trades under Rs 10 on
+# 2026-08-04 produced -211 gross against Rs 694 of charges, and at Rs 0.15 the
+# Rs 0.05 tick is a 33% move, so the angle is quantisation noise, not geometry.
+MIN_PREMIUM = float(_env('MIN_PREMIUM', '0'))
 ANGLE_REQUIRE_CONVEX = _env('ANGLE_REQUIRE_CONVEX', 'true').lower() == 'true'
 ANGLE_EXIT_ON_REVERSE = _env('ANGLE_EXIT_ON_REVERSE', 'true').lower() == 'true'
 

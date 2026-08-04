@@ -99,15 +99,38 @@ def quantity_for(instrument_key: str, symbol: str = '',
         if qty <= 0:
             return 0, (f'{symbol}: Rs {notional:,.0f} notional buys 0 shares '
                        f'at {price:,.2f}')
+        if settings.MAX_NOTIONAL_PER_TRADE:
+            notional = min(notional, settings.MAX_NOTIONAL_PER_TRADE)
+            qty = int(notional // price)
+            if qty <= 0:
+                return 0, (f'{symbol}: notional cap Rs '
+                           f'{settings.MAX_NOTIONAL_PER_TRADE:,.0f} buys 0 shares '
+                           f'at {price:,.2f}')
         qty = min(qty, settings.EQUITY_MAX_QTY)
-        return qty, (f'Rs {settings.EQUITY_MARGIN_PER_TRADE:,.0f} x'
-                     f'{settings.EQUITY_LEVERAGE:g} / {price:,.2f} = {qty}')
+        return qty, (f'Rs {notional:,.0f} / {price:,.2f} = {qty}')
+
+    if settings.MIN_PREMIUM and price is not None and 0 < price < settings.MIN_PREMIUM:
+        return 0, (f'{symbol or instrument_key}: premium {price:,.2f} below '
+                   f'MIN_PREMIUM {settings.MIN_PREMIUM:,.2f}')
 
     u = underlying_of(instrument_key, symbol)
     lots = settings.LOTS_BY_UNDERLYING.get(u)
     ls = lot_size_of(instrument_key)
     if lots and ls:
-        return lots * ls, f'{lots} lot x {ls} = {lots * ls}'
+        note = f'{lots} lot x {ls}'
+        if settings.MAX_NOTIONAL_PER_TRADE and price:
+            # Options trade in whole lots, so the cap must round DOWN to a lot
+            # boundary. Scaling continuously would report a quantity that cannot
+            # be sent to the exchange, and 0 lots means the cap says do not trade.
+            afford = int(settings.MAX_NOTIONAL_PER_TRADE // (ls * price))
+            if afford < lots:
+                if afford <= 0:
+                    return 0, (f'{symbol or u}: 1 lot = Rs {ls * price:,.0f} exceeds '
+                               f'cap Rs {settings.MAX_NOTIONAL_PER_TRADE:,.0f}')
+                note = (f'{afford} lot x {ls} (capped from {lots}; '
+                        f'Rs {afford * ls * price:,.0f})')
+                lots = afford
+        return lots * ls, f'{note} = {lots * ls}'
     if lots and not ls:
         return 0, (f'{u}: lot_size missing from the instrument master — refusing to '
                    f'size (is data/{instrument_key.split("_")[0]}.json current?)')
