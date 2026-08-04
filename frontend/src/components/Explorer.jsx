@@ -71,9 +71,11 @@ export default function Explorer({ home }) {
   const candles = bars
     .filter(b => b.close != null)
     .map(b => ({ time: toSec(b._time), open: b.open, high: b.high, low: b.low, close: b.close }))
-  const vol = bars.map(b => ({
-    time: toSec(b._time), value: b.volume ?? 0,
-    color: b.close >= b.open ? '#26a69a88' : '#ef535088' }))
+  // per-bar traded volume: VTT is cumulative, so the bar difference is the activity.
+  // Tinted by bar direction so buying and selling pressure are separable at a glance.
+  const vol = bars.filter(b => b.volume != null).map(b => ({
+    time: toSec(b._time), value: b.volume,
+    color: b.close >= b.open ? '#26a69a99' : '#ef535099' }))
   const ltq = bars.filter(b => b.ltq != null).map(b => ({ time: toSec(b._time), value: b.ltq }))
   const vtt = bars.filter(b => b.vtt != null).map(b => ({ time: toSec(b._time), value: b.vtt }))
 
@@ -95,10 +97,9 @@ export default function Explorer({ home }) {
       {err && <div className="err">{err}</div>}
 
       <Panel title="LTP — 30s candles" data={candles} type="candle" height={200} />
-      <Panel title="Volume per bar (VTT difference)" data={vol} type="hist"
-             color="#8b949e" height={110} />
-      <Panel title="LTQ — last traded qty (bar mean)" data={ltq} color="#a371f7" height={110} />
-      <Panel title="VTT — cumulative volume" data={vtt} color="#d29922" height={110} />
+      <Panel title="Volume per bar (VTT difference)" data={vol} type="hist" height={120} />
+      <Panel title="LTQ — last traded qty" data={ltq} color="#a371f7" height={120} />
+      <Panel title="VTT — as reported by the feed" data={vtt} color="#d29922" height={120} />
 
       <div className="wrap">
         <table style={{ minWidth: 620 }}>

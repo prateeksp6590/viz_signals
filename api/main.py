@@ -163,7 +163,9 @@ def ticks(key: str, minutes: int = Query(60, ge=1, le=1440),
             o['vtt'] = v.reindex(o.index)                    # cumulative, as stored
             o['volume'] = v.diff().clip(lower=0).reindex(o.index)   # per-bar
         if 'ltq' in df:
-            o['ltq'] = df['ltq'].resample(bucket).mean().reindex(o.index)
+            # last value in the bar, not a mean: LTQ is a reported quantity, and
+            # averaging it invents a number the exchange never printed
+            o['ltq'] = df['ltq'].resample(bucket).last().reindex(o.index)
         o = o.reset_index()
         o['_time'] = o['_time'].dt.tz_convert(IST).astype(str)
         return {'key': key, 'symbol': _symbol_map.get(key, key),
