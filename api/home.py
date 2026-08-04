@@ -21,7 +21,13 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # Tick rates differ by an order of magnitude, so a fixed tick window would mean two
 # minutes on NIFTY and half an hour on a thin MCX strike.
 TREND_WINDOW = {'NSE': 200, 'BSE': 200, 'MCX': 35}
-LIVE_SECS = 60          # ticked within this = live; anything else is not live
+# 'Live' cannot be a fixed number of seconds. A deep-ITM SENSEX put trades ~947 times
+# a session — one tick every ~24s — so a 60s rule makes a perfectly healthy leg flicker
+# between live and not-live all day, while a NIFTY ATM leg ticking 34,000 times would
+# tolerate a 60s stall that is genuinely an incident.
+# So: live if it has ticked within max(LIVE_SECS, LIVE_GAP_MULT x its own median gap).
+LIVE_SECS = 60
+LIVE_GAP_MULT = 6
 
 
 def _journal(name: str, date: str) -> list[dict]:
@@ -142,9 +148,19 @@ def build_rows(reader, symbol_map: dict[str, str], lookback_min: int = 30) -> li
         lk = lastk.get(k)
         age = ((now_utc - df.index[-1].to_pydatetime()).total_seconds() if has
                else (now_utc - lk['t']).total_seconds() if lk else None)
+        # tolerance from the instrument's OWN cadence, measured over the window we
+        # already fetched — no extra query
+        gap = None
+        if has and len(df) > 5:
+            deltas = np.diff(df.index.values).astype('timedelta64[ms]').astype(float) / 1000
+            if deltas.size:
+                gap = float(np.median(deltas))
+        tol = max(LIVE_SECS, LIVE_GAP_MULT * gap) if gap else LIVE_SECS
         row = {'sr': i, 'key': k, 'symbol': sym, 'segment': k.split('|', 1)[0],
-               'status': 'live' if (age is not None and age <= LIVE_SECS) else 'not live',
+               'status': 'live' if (age is not None and age <= tol) else 'not live',
                'age_s': round(age, 1) if age is not None else None,
+               'median_gap_s': round(gap, 1) if gap else None,
+               'live_tol_s': round(tol, 1),
                'ltp': lk['ltp'] if lk else None,      # closing price when not live
                'ltq': None, 'vtt': None,
                'stale': not has and lk is not None,
