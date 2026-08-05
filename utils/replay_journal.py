@@ -19,15 +19,24 @@ load_dotenv()
 from src.config import settings                      # noqa: E402
 from src.utils.sizing import quantity_for, underlying_of, lot_size_of   # noqa: E402
 
+from src.utils.sizing import is_equity                                  # noqa: E402
+from signal_pnl import charges as _charges_detail                       # noqa: E402
+
 IST = timezone(timedelta(hours=5, minutes=30))
-BROK, STT, TXN, SEBI, STAMP, GST = 20.0, 0.0625/100, 0.05/100, 10/1e7, 0.003/100, 0.18
 
 
-def charges(entry, exit_, qty):
-    b, s = entry*qty, exit_*qty
-    brok = BROK*2; txn = (b+s)*TXN; stt = s*STT; sebi = (b+s)*SEBI
-    stamp = b*STAMP; gst = (brok+txn+sebi)*GST
-    return brok+txn+stt+sebi+stamp+gst
+def charges(entry, exit_, qty, instrument_key: str = ''):
+    """ONE charge model, shared with signal_pnl.py.
+
+    This file previously carried its own copy using the OPTIONS rates (0.0625% STT,
+    0.05% txn, flat Rs 20 brokerage) and applied them to equities too. On 2026-08-05
+    that reported Rs 12,764 of charges against signal_pnl's Rs 5,863 for the SAME 96
+    trades -- 2.2x too high, because equity intraday is 0.025% STT on turnover and
+    0.00297% txn. Two models meant the tuning tables in this script disagreed with the
+    P&L report and neither could be trusted. Do not reintroduce a local copy.
+    """
+    return _charges_detail(entry, exit_, qty,
+                           equity=is_equity(instrument_key) if instrument_key else False)
 
 
 def read(p):
@@ -64,7 +73,8 @@ def main():
         gross = (float(p['exit_price']) - float(p['avg_entry'])) * \
                 (1 if p.get('side') == 'LONG' else -1) * qty
         trades.append({'ratio': ratio, 'gross': gross,
-                       'chg': charges(float(p['avg_entry']), float(p['exit_price']), qty),
+                       'chg': charges(float(p['avg_entry']), float(p['exit_price']),
+                                      qty, key)['total'],
                        'u': underlying_of(key, p.get('symbol', '')),
                        'hold': (datetime.fromisoformat(p['exit_ts']) - ets).total_seconds()})
 
