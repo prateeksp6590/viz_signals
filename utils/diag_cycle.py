@@ -18,13 +18,24 @@ never writes. It does hold its own copy of the tick buffers, so expect it to use
 a few hundred MB -- do not run it during market hours on a memory-tight box.
 """
 
+import argparse
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
+from dotenv import load_dotenv
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
+
+# MUST happen before importing settings: settings.py reads os.environ at import
+# time and does NOT load .env itself. Without this the script silently runs on
+# built-in DEFAULTS (50 instruments, ltp/vtt/oi, chunk 20) and no token -> 401,
+# while looking like a real measurement. Explicit path, not load_dotenv()'s
+# CWD-relative search, so it works from any directory.
+load_dotenv(REPO_ROOT / '.env')
 
 from src.config import settings                        # noqa: E402
 from src.main import _load_symbol_map                   # noqa: E402
@@ -33,9 +44,15 @@ from src.services.market_view import MarketData        # noqa: E402
 
 CYCLES = 4
 GAP_SECS = 3
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description='time one engine cycle, split by phase')
+    ap.add_argument('--all', action='store_true',
+                    help='ignore exchange hours (needed after 15:30, when '
+                         '_exchange_open leaves only MCX and the sample is useless)')
+    args = ap.parse_args()
     print(f'instruments={len(settings.ANALYZE_INSTRUMENTS)} '
           f'fields={settings.INFLUX_FIELDS} '
           f'lookback={settings.LOOKBACK_MINUTES}m '
@@ -56,13 +73,26 @@ def main() -> int:
     reader = InfluxReader(smap)
     market = MarketData(reader, smap)
 
+    if not settings.INFLUX_TOKEN:
+        print('\n  INFLUX_TOKEN is empty — .env did not load. Every query will 401.')
+        return 1
+    n_open = sum(1 for k in market.views if market._exchange_open(k))
+    if n_open < len(market.views) and not args.all:
+        print(f'\n  WARNING: only {n_open} of {len(market.views)} instruments are '
+              f'inside their exchange hours right now\n'
+              f'  ({datetime.now(IST):%H:%M} IST). That is NOT the load the engine '
+              f'carries at midday.\n  Re-run with --all to query them anyway, or '
+              f'run this during market hours.\n')
+
     hdr = (f"  {'cycle':<7}{'stale':>10}{'fetched':>10}{'query':>10}"
            f"{'append':>10}{'total':>10}{'held':>12}")
     print(hdr)
     print('  ' + '-' * (len(hdr) - 2))
 
     for i in range(CYCLES):
-        keys = [k for k in market.views if market._exchange_open(k)]
+        keys = ([k for k in market.views]
+                if args.all
+                else [k for k in market.views if market._exchange_open(k)])
         if not keys:
             print('  no instrument is inside its exchange hours — nothing to measure')
             return 1
