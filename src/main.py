@@ -19,6 +19,7 @@ from .services.exit_manager import ExitManager
 from .services.notifier import Notifier
 from .services.signal_engine import SignalEngine
 from .services.brokers.paper import PaperBroker
+from .strategies.ohlc_slope import OhlcMeanSlopeStrategy
 from .strategies.slope_angle import SlopeAngleStrategy
 from .utils.logger import logger
 from .utils.sizing import quantity_for, underlying_of
@@ -26,7 +27,24 @@ from .utils.sizing import quantity_for, underlying_of
 IST = timezone(timedelta(hours=5, minutes=30))
 
 # ── The algorithm drop-in point ───────────────────────────────────────────────
-STRATEGY = SlopeAngleStrategy()      # params come from ANGLE_* env vars
+def _build_strategy():
+    """Selected by STRATEGY_NAME so switching back is an .env edit, not a deploy.
+
+    ohlc_mean_slope is a KNOWN-NEGATIVE detector on the history available
+    (45% win, NET -439,035 across 30 series in strategy_research.ipynb). It is
+    here to gather live data under a different configuration. Do not run it with
+    ORDER_MODE=live without deciding that deliberately.
+    """
+    name = (settings.STRATEGY_NAME or 'slope_angle').strip()
+    if name == 'ohlc_mean_slope':
+        return OhlcMeanSlopeStrategy()
+    if name == 'slope_angle':
+        return SlopeAngleStrategy()
+    raise ValueError(f'unknown STRATEGY_NAME={name!r} '
+                     f'(expected slope_angle|ohlc_mean_slope)')
+
+
+STRATEGY = _build_strategy()         # params come from ANGLE_* / OHLC_SLOPE_* env
 
 
 def _now_ist() -> datetime:

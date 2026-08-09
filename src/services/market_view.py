@@ -9,6 +9,7 @@ from datetime import datetime, time as dt_time, timedelta, timezone
 import pandas as pd
 
 from ..config import settings
+from ..utils.logger import logger
 from .influx_reader import InfluxReader
 
 GREEK_FIELDS = ['iv', 'delta', 'theta', 'gamma', 'vega', 'rho']
@@ -84,9 +85,21 @@ class MarketData:
 
     def __init__(self, reader: InfluxReader, symbol_map: dict[str, str]):
         self._reader = reader
+        def _excluded(key: str) -> bool:
+            sym = (symbol_map.get(key) or key).upper()
+            return any(x in sym for x in settings.ANALYZE_EXCLUDE_SYMBOLS)
+
+        dropped = [k for k in settings.ANALYZE_INSTRUMENTS if _excluded(k)]
+        if dropped:
+            # loud on purpose: silently analysing fewer instruments than the feeder
+            # collects is the kind of mismatch that goes unnoticed for days
+            logger.info(f'excluding {len(dropped)} instrument(s) from analysis by '
+                        f'ANALYZE_EXCLUDE_SYMBOLS='
+                        f'{",".join(settings.ANALYZE_EXCLUDE_SYMBOLS)}: '
+                        f'{[symbol_map.get(k, k) for k in dropped][:5]}')
         self.views: dict[str, InstrumentView] = {
             key: InstrumentView(key, symbol_map.get(key, key))
-            for key in settings.ANALYZE_INSTRUMENTS
+            for key in settings.ANALYZE_INSTRUMENTS if not _excluded(key)
         }
 
     @staticmethod

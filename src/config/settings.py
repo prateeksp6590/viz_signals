@@ -183,6 +183,30 @@ MAX_NOTIONAL_PER_TRADE = float(_env('MAX_NOTIONAL_PER_TRADE', '0'))
 # 2026-08-04 produced -211 gross against Rs 694 of charges, and at Rs 0.15 the
 # Rs 0.05 tick is a 33% move, so the angle is quantisation noise, not geometry.
 MIN_PREMIUM = float(_env('MIN_PREMIUM', '0'))
+
+# --- ohlc_mean_slope strategy -------------------------------------------------
+# Slope-angle over the (O+H+L+C)/4 of COMPLETED bars rather than raw ticks.
+# n1/n2 are in BARS: the tick strategy's 50/80 would be 80 minutes of history per
+# signal on 1-min bars. Defaults mirror what strategy_research.ipynb scored.
+OHLC_SLOPE_INTERVAL    = _env('OHLC_SLOPE_INTERVAL', '1min')
+OHLC_SLOPE_N1          = int(_env('OHLC_SLOPE_N1', '5'))
+OHLC_SLOPE_N2          = int(_env('OHLC_SLOPE_N2', '8'))
+OHLC_SLOPE_Q           = float(_env('OHLC_SLOPE_Q', '0.80'))
+OHLC_SLOPE_WINDOW      = int(_env('OHLC_SLOPE_WINDOW', '120'))   # bars, ~2h
+OHLC_SLOPE_MIN_SAMPLES = int(_env('OHLC_SLOPE_MIN_SAMPLES', '30'))
+
+# Which strategy the engine runs. Kept as a NAME so a rollback is an .env edit and
+# a restart, not a code change.
+STRATEGY_NAME = _env('STRATEGY_NAME', 'slope_angle')   # slope_angle | ohlc_mean_slope
+
+# Substrings matched against the TRADING SYMBOL to drop instruments from analysis.
+# The feeder may collect things the strategy should not trade -- futures are the
+# case in point: SENSEX futures share the BSE_FO segment with SENSEX options, so a
+# segment filter alone cannot separate them, and the instrument KEY does not say
+# which is which. Collecting futures for research while excluding them from live
+# signals is deliberate.
+_excl = _env('ANALYZE_EXCLUDE_SYMBOLS', 'FUT')
+ANALYZE_EXCLUDE_SYMBOLS = [x.strip().upper() for x in _excl.split(',') if x.strip()]
 ANGLE_REQUIRE_CONVEX = _env('ANGLE_REQUIRE_CONVEX', 'true').lower() == 'true'
 ANGLE_EXIT_ON_REVERSE = _env('ANGLE_EXIT_ON_REVERSE', 'true').lower() == 'true'
 
