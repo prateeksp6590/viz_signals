@@ -179,6 +179,11 @@ EQUITY_MAX_QTY          = int(_env('EQUITY_MAX_QTY', '10000'))
 # Rs 2,000 to Rs 122,331 for the same "5 lots / 10 lots". The four trades above
 # Rs 100k lost Rs 14,792 gross; everything else together made +3,590.
 MAX_NOTIONAL_PER_TRADE = float(_env('MAX_NOTIONAL_PER_TRADE', '0'))
+
+# Concurrent positions allowed per UNDERLYING per side (CE/PE). 0 disables.
+# MAX_OPEN_POSITIONS counts instruments and treats six adjacent SENSEX strikes as
+# six independent trades. They are not -- they share one spot and move together.
+MAX_POSITIONS_PER_UNDERLYING = int(_env('MAX_POSITIONS_PER_UNDERLYING', '0'))
 # Below this premium a round trip cannot pay for itself: 14 trades under Rs 10 on
 # 2026-08-04 produced -211 gross against Rs 694 of charges, and at Rs 0.15 the
 # Rs 0.05 tick is a 33% move, so the angle is quantisation noise, not geometry.

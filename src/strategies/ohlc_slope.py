@@ -118,9 +118,19 @@ class OhlcMeanSlopeStrategy(Strategy):
             action = SignalAction.ENTER_SHORT
 
         price = float(view.ltp if view.ltp is not None else mean.iloc[-1])
+        # `meta` is the numeric channel the tooling reads -- check_signals pulls
+        # meta['angle_deg'] for its distribution column and replay_journal matches
+        # entries on the angle/threshold ratio. Putting the numbers only in the
+        # free-text reason left both blank on 2026-08-10.
+        meta = {'angle_deg': float(a['angle_deg']), 'threshold_deg': float(thr),
+                'ratio': float(a['angle_deg'] / thr) if thr else None,
+                'slope_base': float(a['slope_base']),
+                'slope_full': float(a['slope_full']),
+                'slope_recent': float(a['slope_recent']),
+                'bars': int(len(mean)), 'interval': self.interval}
         return [Signal(
             instrument_key=key, symbol=view.symbol, action=action, price=price,
-            strategy=self.name,
+            strategy=self.name, meta=meta,
             reason=(f'ohlc_mean_slope: angle {a["angle_deg"]:.2f} >= {thr:.2f}deg '
                     f'[{self.interval} O H L C mean, n1={self.n1} n2={self.n2} '
                     f'q={self.q}]'))]

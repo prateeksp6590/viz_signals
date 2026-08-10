@@ -53,6 +53,10 @@ class PositionTracker:
     def get_open(self, instrument_key: str) -> Position | None:
         return self._open.get(instrument_key)
 
+    def open_symbols(self) -> list[str]:
+        """Symbols of every currently open position, for correlation checks."""
+        return [p.symbol for p in self._open.values()]
+
     @property
     def open_count(self) -> int:
         return len(self._open)

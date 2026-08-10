@@ -8,6 +8,15 @@ from ..utils.logger import logger
 from .position_tracker import PositionTracker
 
 
+def _underlying_root(symbol: str) -> str:
+    """First word of the trading symbol: 'SENSEX 78000 PE 13 AUG 26' -> 'SENSEX'.
+
+    Deliberately crude. Every strike and expiry of one index collapses to one root,
+    which is exactly the grouping that matters -- they all move with the same spot.
+    """
+    return (symbol or '').strip().split(' ', 1)[0].upper()
+
+
 class RiskGate:
     def __init__(self, tracker: PositionTracker, journal):
         self._tracker = tracker
@@ -44,6 +53,24 @@ class RiskGate:
 
         if self._tracker.open_count >= settings.MAX_OPEN_POSITIONS:
             return False, f'max open positions ({settings.MAX_OPEN_POSITIONS}) reached'
+
+        # Adjacent strikes of one index are NOT independent trades. On 2026-08-10 the
+        # engine opened six SENSEX PE strikes (78000-78500) within minutes; SENSEX rose
+        # and all six lost 8.1-8.5%. That is one directional call sized 6x. It tripped
+        # the daily loss limit by 10:15 and suppressed 170 signals over the remaining
+        # five hours -- the fourth session truncated to a morning. One strike instead of
+        # six would have lost ~4,000 rather than 23,895, and the day would have run.
+        cap = settings.MAX_POSITIONS_PER_UNDERLYING
+        if cap > 0:
+            side = 'CE' if ' CE ' in f' {sig.symbol} ' else (
+                   'PE' if ' PE ' in f' {sig.symbol} ' else '')
+            root = _underlying_root(sig.symbol)
+            same = [s for s in self._tracker.open_symbols()
+                    if _underlying_root(s) == root
+                    and (not side or f' {side} ' in f' {s} ')]
+            if len(same) >= cap:
+                return False, (f'{root}{" " + side if side else ""}: '
+                               f'{len(same)} correlated position(s) open, cap {cap}')
 
         qty = sig.qty or settings.ORDER_QTY_DEFAULT
         notional = qty * sig.price
