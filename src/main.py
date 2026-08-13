@@ -223,6 +223,18 @@ def main():
             _t = time.monotonic()
             cycle_signals = engine.run_cycle()
             t_calc = time.monotonic() - _t
+            # STRONGEST FIRST. MAX_POSITIONS_PER_UNDERLYING allows one position per
+            # underlying+side, and the gate is stateless -- so whichever signal the
+            # loop happens to reach first claims the slot. On 2026-08-12 that was
+            # dictionary insertion order, and ONE strike (78000) took 25 of 33 trades
+            # while eleven other strikes generated 400+ signals between them. The
+            # instrument being traded was decided by list position, not by the signal.
+            # Sorting by meta['ratio'] gives the slot to the best available signal.
+            # EXITs keep priority: reducing risk is never queued behind an entry.
+            cycle_signals = sorted(
+                cycle_signals,
+                key=lambda s: (s.action != SignalAction.EXIT,
+                               -float((s.meta or {}).get('ratio') or 0.0)))
             for sig in cycle_signals:
                 notifier.notify(sig)
                 if broker is None:
