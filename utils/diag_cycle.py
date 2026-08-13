@@ -25,17 +25,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
-from dotenv import load_dotenv
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT))
-
-# MUST happen before importing settings: settings.py reads os.environ at import
-# time and does NOT load .env itself. Without this the script silently runs on
-# built-in DEFAULTS (50 instruments, ltp/vtt/oi, chunk 20) and no token -> 401,
-# while looking like a real measurement. Explicit path, not load_dotenv()'s
-# CWD-relative search, so it works from any directory.
-load_dotenv(REPO_ROOT / '.env')
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _bootstrap import REPO_ROOT                        # noqa: E402,F401
 
 from src.config import settings                        # noqa: E402
 from src.main import _load_symbol_map                   # noqa: E402

@@ -32,7 +32,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# MUST be first: settings.py reads os.environ and never loads .env, so without this
+# the script runs on built-in defaults with an empty token and 401s on every query.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _bootstrap import REPO_ROOT                             # noqa: E402,F401
 
 from src.config import settings                              # noqa: E402
 from influxdb_client import InfluxDBClient                   # noqa: E402
