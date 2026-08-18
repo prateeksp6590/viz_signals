@@ -58,6 +58,7 @@ only past its own last stored timestamp for that date.
 """
 
 import argparse
+import json
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -106,15 +107,64 @@ def existing_coverage(date_str: str) -> dict:
     return out
 
 
+def master_map(master_dir: Path) -> dict:
+    """measurement -> instrument_key from the FULL instrument master.
+
+    NOT from _load_symbol_map(): that resolves only the keys currently SUBSCRIBED,
+    so any strike traded on an earlier day but absent from today's chain looks
+    "expired" when it is simply not in today's subscription. On 2026-08-17 that
+    misreported 32 of 44 live 20-AUG contracts as unrecoverable and backfilled only
+    12 of them.
+
+    The master holds every live contract, so what remains unresolved after this is
+    genuinely expired and genuinely needs the Expired Instruments API.
+    """
+    out = {}
+    for p in sorted(Path(master_dir).glob('*.json')):
+        try:
+            rows = json.loads(p.read_text(encoding='utf-8'))
+        except Exception as e:
+            print(f'  could not read {p.name}: {e}')
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            k, s = row.get('instrument_key'), row.get('trading_symbol')
+            if k and s:
+                out[f"{str(k).split('|')[0].split('_')[0]}_{s}"] = k
+    return out
+
+
+def find_master_dir(explicit: str | None) -> Path | None:
+    cands = [Path(explicit)] if explicit else [
+        REPO_ROOT.parent / 'viz_hedge' / 'data',
+        Path.home() / 'viz_hedge' / 'data',
+        REPO_ROOT / 'data',
+    ]
+    for c in cands:
+        if c.is_dir() and any(c.glob('*.json')):
+            return c
+    return None
+
+
 def fetch_candles(key: str, date_str: str, token: str, session=None) -> list:
     """1-minute candles for one instrument on one date -> [(start_dt, o,h,l,c,v,oi)].
 
-    V3 path is /historical-candle/{key}/{unit}/{interval}/{to}/{from}. The response
-    is the same shape as the deprecated v2: data.candles as arrays of
-    [iso_ts, open, high, low, close, volume, open_interest], newest first.
+    Two different endpoints, and using the wrong one returns an EMPTY list rather
+    than an error:
+      past dates  /v3/historical-candle/{key}/minutes/1/{to}/{from}
+      TODAY       /v3/historical-candle/intraday/{key}/minutes/1
+    The historical endpoint does not serve the current session. That is why the
+    first run backfilled 0 points for 2026-08-18 while reporting 22 resolved
+    instruments -- it looked like a permissions or expiry problem and was neither.
     """
-    _, iso = day_bounds(date_str)
-    url = f'{HIST_URL}/{quote(key, safe="")}/minutes/1/{iso}/{iso}'
+    d, iso = day_bounds(date_str)
+    if d == datetime.now(IST).date():
+        url = f'{HIST_URL}/intraday/{quote(key, safe="")}/minutes/1'
+    else:
+        url = f'{HIST_URL}/{quote(key, safe="")}/minutes/1/{iso}/{iso}'
     http = session or requests
     r = http.get(url, headers={'Accept': 'application/json',
                                'Authorization': f'Bearer {token}'}, timeout=30)
@@ -188,6 +238,9 @@ def main() -> int:
                     help='show the hole per day and resolve keys; write nothing')
     ap.add_argument('--cutoff', default='15:29',
                     help='flag any day whose last tick is at/before this (HH:MM)')
+    ap.add_argument('--master-dir', default=None,
+                    help='dir holding the instrument master JSONs '
+                         '(default: ../viz_hedge/data or ~/viz_hedge/data)')
     a = ap.parse_args()
 
     bucket = a.bucket or settings.INFLUX_BUCKET
@@ -196,16 +249,13 @@ def main() -> int:
         print('no weekdays in range')
         return 1
 
-    try:
-        from src.main import _load_symbol_map
-        smap = _load_symbol_map() or {}
-    except Exception as e:
-        print(f'symbol map unavailable ({e}) — cannot resolve keys')
-        smap = {}
-    # measurement -> instrument_key, inverting key -> symbol
-    by_meas = {}
-    for k, sym in smap.items():
-        by_meas[f"{str(k).split('|')[0].split('_')[0]}_{sym}"] = k
+    mdir = find_master_dir(a.master_dir)
+    if not mdir:
+        print('Could not find the instrument master (viz_hedge/data/*.json). '
+              'Pass --master-dir. Without it almost everything reports as expired.')
+        return 1
+    by_meas = master_map(mdir)
+    print(f'instrument master: {mdir}  ({len(by_meas):,} contracts)')
 
     ch, cm = a.cutoff.split(':')
     cutoff = int(ch) * 60 + int(cm)
@@ -232,8 +282,8 @@ def main() -> int:
         unresolved = sorted(set(truncated) - set(resolved))
         if unresolved:
             unresolved_all.update(unresolved)
-            print(f'  {len(unresolved)} measurement(s) NOT in the current instrument '
-                  f'master — almost certainly expired contracts:')
+            print(f'  {len(unresolved)} measurement(s) absent from the FULL '
+                  f'instrument master — these really are expired contracts:')
             for m in unresolved[:4]:
                 print(f'      {m}')
             if len(unresolved) > 4:
