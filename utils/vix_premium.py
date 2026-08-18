@@ -178,10 +178,10 @@ def main() -> int:
     print('VARIANCE RISK PREMIUM = VIX(t) - realised vol of NIFTY over the NEXT n days')
     print('=' * 78)
     print(f"  {'n':>4}{'indep':>7}{'overlap':>9}{'mean':>9}{'median':>9}"
-          f"{'IV>RV %':>9}{'worst':>9}{'p5':>8}{'~Rs/lot':>10}")
-    print('  ' + '-' * 74)
+          f"{'sd':>8}{'t':>6}{'IV>RV %':>9}{'worst':>9}{'p5':>8}{'~Rs/lot':>10}")
+    print('  ' + '-' * 88)
 
-    results = {}
+    results, tstats = {}, {}
     for n in horizons:
         d = df.copy()
         d['rv'] = forward_rv(d['spot'], n)
@@ -192,13 +192,29 @@ def main() -> int:
             continue
         ind = independent_rows(d, n)
         p = ind['prem'].values
+        # t on the INDEPENDENT windows only. Computing it on the 481 overlapping
+        # rows would divide by sqrt(481) instead of sqrt(23) and inflate t by ~4.5x,
+        # turning a marginal result into a certainty. This is the same overlap error
+        # that made "30 series" look like 30 sessions.
+        sd = float(np.std(p, ddof=1))
+        se = sd / np.sqrt(len(p)) if len(p) > 1 else np.nan
+        t = float(np.mean(p) / se) if se and se > 0 else np.nan
+        tstats[n] = (t, sd, len(p))
         rup = straddle_rupees(float(np.mean(p)), float(ind['spot'].mean()), n, a.lot)
         results[n] = ind
         print(f'  {n:>4}{len(ind):>7}{len(d):>9}{np.mean(p):>9.2f}'
-              f'{np.median(p):>9.2f}{100 * (p > 0).mean():>9.0f}'
+              f'{np.median(p):>9.2f}{sd:>8.2f}{t:>6.1f}'
+              f'{100 * (p > 0).mean():>9.0f}'
               f'{np.min(p):>9.2f}{np.percentile(p, 5):>8.2f}{rup:>10,.0f}')
 
     print('  units are ANNUALISED VOL POINTS. positive = implied richer than realised.')
+    print('  t is computed on INDEPENDENT windows. |t| < 2 means the mean is not')
+    print('  distinguishable from zero however pleasant it looks.')
+    for n, (t, sd, k) in tstats.items():
+        if np.isfinite(t) and abs(t) < 2.0:
+            need = int(np.ceil((2.0 * sd / abs(np.mean(results[n]['prem'].values))) ** 2))
+            print(f'    n={n}: t={t:.1f} on {k} windows — NOT significant; '
+                  f'~{need} windows needed (~{need * n / 252:.1f} years)')
     print('  n=21 is the like-for-like row (VIX is a 30-calendar-day measure);')
     print('  shorter rows tell you about YOUR holding period but mix horizons.')
     print('  ~Rs/lot is indicative only — see straddle_rupees() for what it assumes.')
@@ -214,20 +230,29 @@ def main() -> int:
 
     # Regime split: the premium is usually fat when VIX is low and violently negative
     # when vol spikes. A single average hides both.
-    n = max(results) if results else None
+    # SHORTEST horizon, not the longest: it has the most independent windows. At
+    # n=21 there are only ~23 windows, so quartiles hold 5-8 each and the buckets
+    # will disagree with each other purely by chance. At n=5 they hold ~25.
+    n = min(results) if results else None
     if n:
         ind = results[n].copy()
-        ind['bucket'] = pd.qcut(ind['vix'], min(4, max(2, len(ind) // 6)),
-                                duplicates='drop')
-        print(f'\n  BY VIX LEVEL AT ENTRY (n={n}) — is the premium there when you '
-              f'would actually sell?')
+        nb = min(4, max(2, len(ind) // 12))
+        ind['bucket'] = pd.qcut(ind['vix'], nb, duplicates='drop')
+        print(f'\n  BY VIX LEVEL AT ENTRY (n={n}, the horizon with the most windows)')
+        print(f'  — is the premium there when you would actually sell?')
         print(f"    {'VIX range':>18}{'windows':>9}{'mean prem':>11}{'IV>RV %':>9}"
               f"{'worst':>9}")
         print('    ' + '-' * 54)
+        thin = False
         for b, g in ind.groupby('bucket', observed=True):
             v = g['prem'].values
+            thin = thin or len(g) < 15
             print(f'    {str(b):>18}{len(g):>9}{v.mean():>11.2f}'
                   f'{100 * (v > 0).mean():>9.0f}{v.min():>9.2f}')
+        if thin:
+            print('    AT LEAST ONE BUCKET HAS UNDER 15 WINDOWS. Buckets that small')
+            print('    disagree with each other by chance; a negative bucket here is')
+            print('    not evidence of anything. Do not build a VIX filter on this.')
 
     print('\n' + '=' * 78)
     print('HOW TO READ THIS')
