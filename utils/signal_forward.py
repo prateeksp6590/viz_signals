@@ -326,6 +326,51 @@ def runup_table(sig: pd.DataFrame, ctrl: pd.DataFrame, horizons) -> None:
     print('  means the signal fires at the END of the move, not the start.')
 
 
+BUCKETS = ((1.0, 1.1), (1.1, 1.2), (1.2, 1.4), (1.4, 99))
+
+
+def strength_cross(sig: pd.DataFrame, ctrl: pd.DataFrame, h: int = 10) -> None:
+    """Split the strength buckets by side and by day.
+
+    WHY. On 17-18 Aug the top bucket (ratio >= 1.4) was the only cell in the whole
+    study to clear the 0.82% cost floor. But over those two days CE signals beat
+    their own random baseline and PE signals lost to theirs, which is the index
+    trend showing through rather than anything the detector knows. If the top
+    bucket is mostly CE, or mostly one day, then "strong signals work" and "the
+    index went up" are the same statement and it will invert on a down day --
+    exactly how the ratio>=1.50 filter behaved in replay_journal.
+
+    A survivable result looks positive in BOTH sides and BOTH days. Anything else
+    is a trend artifact wearing a threshold costume.
+    """
+    col = f'h{h}'
+    if col not in sig or 'ratio' not in sig:
+        return
+    groups = ([('side', s, s) for s in ('CE', 'PE')]
+              + [('date', d, d[-4:]) for d in sorted(sig['date'].unique())])
+    print(f'\n── STRENGTH x SIDE and STRENGTH x DAY   (mean {h}m forward %, n)')
+    print(f"  {'bucket':>12}" + ''.join(f'{lab:>16}' for _, _, lab in groups))
+    print('  ' + '-' * (12 + 16 * len(groups)))
+    for lo, hi in BUCKETS:
+        cells = ''
+        for gcol, gval, _ in groups:
+            s = sig[(sig['ratio'] >= lo) & (sig['ratio'] < hi) & (sig[gcol] == gval)]
+            v = s[col].to_numpy(dtype=float)
+            v = v[np.isfinite(v)]
+            cells += f'{"—":>16}' if len(v) < 8 else f'{v.mean():>+9.3f}{f"({len(v)})":>7}'
+        print(f'  {f"{lo:.1f}-{hi:.1f}":>12}{cells}')
+    rnd = ctrl[ctrl['kind'] == 'rand']
+    cells = ''
+    for gcol, gval, _ in groups:
+        v = rnd[rnd[gcol] == gval][col].to_numpy(dtype=float)
+        v = v[np.isfinite(v)]
+        cells += f'{"—":>16}' if len(v) < 8 else f'{v.mean():>+9.3f}{f"({len(v)})":>7}'
+    print(f'  {"rand CTRL":>12}{cells}')
+    print(f'  Each cell must beat its own column\'s rand CTRL by more than '
+          f'{BREAKEVEN_PCT:.2f}%.')
+    print('  A bucket that only works on one side or one day is the index trend.')
+
+
 def near_split(ctrl: pd.DataFrame, horizons) -> None:
     """Why `near` is not usable as a control, stated in the output rather than only
     in the docstring — pre-signal draws see the run-up, post-signal draws do not."""
@@ -405,9 +450,11 @@ def main() -> int:
     # on 18 Aug, off 15 and 21 trades. Here each bucket holds hundreds.
     print('\n── BY SIGNAL STRENGTH (ratio = angle / adaptive threshold)')
     hdr = ''.join(f'{f"h{h}m":>10}' for h in horizons)
-    print(f"  {'bucket':>12}{'n':>7}{hdr}{'win h10':>9}")
-    print('  ' + '-' * (19 + 10 * len(horizons) + 9))
-    for lo, hi in ((1.0, 1.1), (1.1, 1.2), (1.2, 1.4), (1.4, 99)):
+    # med h10 alongside mean h10: these are fat-tailed: a bucket mean can clear the
+    # cost floor on two or three trades while the typical signal in it goes nowhere.
+    print(f"  {'bucket':>12}{'n':>7}{hdr}{'med h10':>10}{'win h10':>9}")
+    print('  ' + '-' * (19 + 10 * len(horizons) + 19))
+    for lo, hi in BUCKETS:
         sub = sig[(sig['ratio'] >= lo) & (sig['ratio'] < hi)]
         if len(sub) < 10:
             continue
@@ -415,8 +462,10 @@ def main() -> int:
                         for h in horizons)
         h10 = sub['h10'].to_numpy(dtype=float) if 'h10' in sub else np.array([])
         h10 = h10[np.isfinite(h10)]
+        m10 = float(np.median(h10)) if len(h10) else np.nan
         w10 = 100.0 * (h10 > 0).mean() if len(h10) else np.nan
-        print(f'  {f"{lo:.1f}-{hi:.1f}":>12}{len(sub):>7}{cells}{_f(w10, 9, 0)}')
+        print(f'  {f"{lo:.1f}-{hi:.1f}":>12}{len(sub):>7}{cells}'
+              f'{_f(m10, 10)}{_f(w10, 9, 0)}')
     rnd = ctrl[ctrl['kind'] == 'rand']
     cells = ''.join(_f(np.nanmean(rnd[f'h{h}'].to_numpy(dtype=float)), 10)
                     for h in horizons)
@@ -426,6 +475,7 @@ def main() -> int:
     print('  Bucket-vs-bucket is the safe comparison here; the buckets are not')
     print('  matched on time of day, so a monotone column could still be a clock.')
 
+    strength_cross(sig, ctrl, h=10)
     near_split(ctrl, horizons)
 
     print('\nHow to read p: the percentile of the signal mean inside a bootstrap of')
