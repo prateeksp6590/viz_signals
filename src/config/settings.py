@@ -130,7 +130,12 @@ ENGINE_STOP        = _env('ENGINE_STOP', '23:30')    # IST HH:MM — MCX runs la
 # Per-exchange close. After its close an instrument is skipped: it cannot tick, so
 # querying it wastes rows and its stale view would keep re-triggering the strategy.
 EXCHANGE_CLOSE = {}
-for _p in _env('EXCHANGE_CLOSE', 'NSE:15:30,BSE:15:30,MCX:23:30').split(','):
+# NSE/BSE at 15:40, not 15:30, since 2026-08-03: the equity derivatives session was
+# extended 10 minutes so F&O can react to SEBI's Closing Auction Session, which runs
+# 15:15-15:35 in the cash market. At 15:30 the engine stops polling BSE_FO exactly
+# when the auction-driven close is being discovered — and session edges are the one
+# effect that has replicated across this project (18/18 series).
+for _p in _env('EXCHANGE_CLOSE', 'NSE:15:40,BSE:15:40,MCX:23:30').split(','):
     _bits = _p.split(':')
     if len(_bits) == 3:
         EXCHANGE_CLOSE[_bits[0].strip().upper()] = f'{_bits[1]}:{_bits[2]}'

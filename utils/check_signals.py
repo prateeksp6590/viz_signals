@@ -31,7 +31,11 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / '.env')
 
 IST = timezone(timedelta(hours=5, minutes=30))
-ENGINE_START, ENGINE_STOP = dt_time(9, 16), dt_time(15, 30)
+# 15:40, not 15:30: the equity derivatives session was extended by 10 minutes on
+# 2026-08-03 when SEBI's Closing Auction Session (15:15-15:35 in the cash market)
+# took effect. Leaving this at 15:30 makes the last 10 minutes read as "outside
+# engine hours", so a feed that dies at 15:31 raises nothing.
+ENGINE_START, ENGINE_STOP = dt_time(9, 16), dt_time(15, 40)
 VERDICT = ['OK', 'WARNING', 'CRITICAL']
 
 
