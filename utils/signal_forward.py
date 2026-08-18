@@ -26,19 +26,37 @@ from expiry: theta alone makes the average forward return negative at every hori
 for every entry, signal or not. So "signals lose money over 10 minutes" would be true
 of a coin flip and proves nothing.
 
-Two controls, drawn from the SAME instrument on the SAME day, and carrying the same
-date/side labels as the signals so every table below compares like with like:
-  rand  -- a uniformly random tick in the session. Controls for the instrument and
-           for theta drift.
-  near  -- a random tick within +/-NEAR_MIN minutes of a real signal. Also controls
-           for TIME OF DAY, which matters because the one robust finding in this
-           project is that large moves cluster at the session edges (18/18 series).
-           An identical study on order-flow fields found a pure clock control scoring
-           AUC 0.707 against 0.577 for volume. `near` is the honest benchmark: if the
-           signal beats `rand` but not `near`, the signal is a clock.
+  rand  -- a uniformly random tick on the same instrument and day. THE BENCHMARK.
+           Unbiased with respect to the price path, which is the only property that
+           matters for the headline question.
+  near  -- a tick within +/-NEAR_MIN minutes of a real signal. DIAGNOSTIC ONLY, NOT
+           A BENCHMARK, and the reason is worth reading.
 
-The p column is the signal mean's percentile inside a bootstrap of `near` means at
+*** WHY `near` IS NOT A BENCHMARK — a bug in the first version of this script ***
+The intent was a clock control, since the one robust finding in this project is that
+large moves cluster at the session edges, and an order-flow study here already found
+a pure time-of-day control out-scoring volume (AUC 0.707 vs 0.577). But drawing the
+offset uniformly from -NEAR_MIN to +NEAR_MIN puts half the draws BEFORE the signal,
+and a draw at t-20 has a 20-minute forward window ending exactly at t: it measures
+the run-up that CAUSED the signal to fire. The control was conditioned on a future
+event, so it was biased upward by construction.
+
+The 2026-08-17/18 run showed it plainly -- `rand` was flat across horizons
+(0.004/0.097/0.168/0.267) while `near` climbed to 3.063, 11x higher. That gap is not
+a clock effect, it is the pre-signal rise being counted as if it were a baseline. It
+made an edge of roughly zero look like -2.6% at p=0.
+
+`near` is kept, split into pre- and post-signal draws, because the split is the
+cleanest measurement of the run-up. It is never used to compute an edge or a p.
+
+The p column is the signal mean's percentile inside a bootstrap of `rand` means at
 the same n. 50 means the signal sits exactly where chance puts it. Read it first.
+
+THE TABLE THAT NEEDS NO CONTROL AT ALL
+--------------------------------------
+Backward returns over the minutes BEFORE each signal, next to forward returns over
+the minutes after. If a detector is buying the top of a move, the run-up is large and
+the follow-through is not, and no benchmark is required to see it.
 
 BREAKEVEN, so a positive number is not mistaken for a profitable one
 -------------------------------------------------------------------
@@ -68,6 +86,7 @@ from influxdb_client import InfluxDBClient                   # noqa: E402
 IST = timezone(timedelta(hours=5, minutes=30))
 NS_MIN = 60 * 10 ** 9
 HORIZONS = (2, 5, 10, 20)
+BACK = (5, 10, 20)         # minutes BEFORE the signal, for the run-up table
 MAX_STALE_MIN = 2          # an asof price older than this is a data gap, not a price
 NEAR_MIN = 20              # +/- window for the time-matched control
 N_CTRL = 5                 # draws per signal, per control type
@@ -161,6 +180,23 @@ def fwd(idx: np.ndarray, vals: np.ndarray, t: int, horizons) -> dict:
     return out
 
 
+def back(idx: np.ndarray, vals: np.ndarray, t: int, horizons) -> dict:
+    """Return over the window ENDING at t. Positive = premium rose into the signal.
+
+    Needs no control: it is the same instrument over the adjacent window, so run-up
+    and follow-through are directly comparable to each other.
+    """
+    max_stale = MAX_STALE_MIN * NS_MIN
+    p0 = _asof(idx, vals, t, max_stale)
+    out = {}
+    for h in horizons:
+        tb = t - h * NS_MIN
+        p1 = _asof(idx, vals, tb, max_stale) if tb >= idx[0] else np.nan
+        out[h] = (100.0 * (p0 / p1 - 1.0)
+                  if (np.isfinite(p0) and np.isfinite(p1) and p1 > 0) else np.nan)
+    return out
+
+
 def boot_pctile(signal_mean: float, pool: np.ndarray, n: int, rng) -> float:
     """Where the signal mean sits in the distribution of control means at the same n."""
     pool = np.asarray(pool, float)
@@ -212,28 +248,39 @@ def collect(dates, horizons, near_min, rng, loader=None):
                 m = s.get('meta') or {}
                 ang, thr = m.get('angle_deg'), m.get('threshold_deg')
                 side = side_of(str(s.get('symbol', '')))
+                bk = back(idx, vals, t, BACK)
                 sig_rows.append({'date': date_str, 'side': side,
                                  'ratio': (float(ang) / float(thr))
                                           if (ang and thr) else np.nan,
-                                 **{f'h{h}': f[h] for h in horizons}})
+                                 **{f'h{h}': f[h] for h in horizons},
+                                 **{f'b{h}': bk[h] for h in BACK}})
 
                 for _ in range(N_CTRL):
                     j = int(rng.integers(0, len(idx)))
-                    cf = fwd(idx, vals, int(idx[j]), horizons)
+                    tr = int(idx[j])
+                    cf, cb = fwd(idx, vals, tr, horizons), back(idx, vals, tr, BACK)
                     ctrl_rows.append({'date': date_str, 'side': side, 'kind': 'rand',
-                                      **{f'h{h}': cf[h] for h in horizons}})
+                                      'off': np.nan,
+                                      **{f'h{h}': cf[h] for h in horizons},
+                                      **{f'b{h}': cb[h] for h in BACK}})
 
-                    off = int(rng.integers(-near_min, near_min + 1)) * NS_MIN
-                    cf = fwd(idx, vals, t + off, horizons)
+                    # offset kept so the pre/post split can be reported -- drawing
+                    # from [-near, +near] and pooling the two is what made the first
+                    # version of this script wrong.
+                    off_m = int(rng.integers(-near_min, near_min + 1))
+                    cf = fwd(idx, vals, t + off_m * NS_MIN, horizons)
                     ctrl_rows.append({'date': date_str, 'side': side, 'kind': 'near',
-                                      **{f'h{h}': cf[h] for h in horizons}})
+                                      'off': off_m,
+                                      **{f'h{h}': cf[h] for h in horizons},
+                                      **{f'b{h}': np.nan for h in BACK}})
 
     return (pd.DataFrame(sig_rows), pd.DataFrame(ctrl_rows), dropped)
 
 
 def build(sub_sig: pd.DataFrame, sub_ctrl: pd.DataFrame, horizons, rng) -> list:
+    """Edge and p are computed against `rand` ONLY. `near` is path-conditioned and
+    would manufacture a large fake edge — see the module docstring."""
     rnd = sub_ctrl[sub_ctrl['kind'] == 'rand'] if len(sub_ctrl) else sub_ctrl
-    nr = sub_ctrl[sub_ctrl['kind'] == 'near'] if len(sub_ctrl) else sub_ctrl
     out = []
     for h in horizons:
         col = f'h{h}'
@@ -241,15 +288,62 @@ def build(sub_sig: pd.DataFrame, sub_ctrl: pd.DataFrame, horizons, rng) -> list:
         v = v[np.isfinite(v)]
         if len(v) < 3:
             continue
-        npool = nr[col].to_numpy(dtype=float) if len(nr) else np.array([])
         rpool = rnd[col].to_numpy(dtype=float) if len(rnd) else np.array([])
-        nm = float(np.nanmean(npool)) if np.isfinite(npool).any() else np.nan
         rm = float(np.nanmean(rpool)) if np.isfinite(rpool).any() else np.nan
         out.append({'h': h, 'n': len(v), 'mean': float(v.mean()),
                     'med': float(np.median(v)), 'win': 100.0 * float((v > 0).mean()),
-                    'rand': rm, 'near': nm, 'edge': float(v.mean()) - nm,
-                    'p': boot_pctile(float(v.mean()), npool, len(v), rng)})
+                    'rand': rm, 'edge': float(v.mean()) - rm,
+                    'p': boot_pctile(float(v.mean()), rpool, len(v), rng)})
     return out
+
+
+def runup_table(sig: pd.DataFrame, ctrl: pd.DataFrame, horizons) -> None:
+    """The run-up into each signal against the follow-through after it.
+
+    No control is involved: both windows are the same instrument, adjacent in time.
+    If the detector buys the top of a move, the left column is large and the right
+    column is not, and that is visible without any benchmark at all.
+    """
+    print('\n── RUN-UP INTO THE SIGNAL vs FOLLOW-THROUGH AFTER IT  (no control needed)')
+    print(f"  {'window':>12}{'n':>7}{'mean':>10}{'median':>10}{'up%':>7}"
+          f"{'random same window':>21}")
+    print('  ' + '-' * 67)
+    rnd = ctrl[ctrl['kind'] == 'rand']
+    rows = ([(f'-{h}m -> 0', f'b{h}') for h in sorted(BACK, reverse=True)]
+            + [('0 -> +%dm' % h, f'h{h}') for h in horizons])
+    for label, col in rows:
+        if col not in sig:
+            continue
+        v = sig[col].to_numpy(dtype=float)
+        v = v[np.isfinite(v)]
+        if len(v) < 3:
+            continue
+        r = rnd[col].to_numpy(dtype=float) if col in rnd else np.array([])
+        rm = float(np.nanmean(r)) if np.isfinite(r).any() else np.nan
+        print(f'  {label:>12}{len(v):>7}{v.mean():>10.3f}{np.median(v):>10.3f}'
+              f'{100.0 * (v > 0).mean():>7.0f}{_f(rm, 21)}')
+    print('  A momentum entry needs follow-through >= run-up. Run-up much larger')
+    print('  means the signal fires at the END of the move, not the start.')
+
+
+def near_split(ctrl: pd.DataFrame, horizons) -> None:
+    """Why `near` is not usable as a control, stated in the output rather than only
+    in the docstring — pre-signal draws see the run-up, post-signal draws do not."""
+    nr = ctrl[ctrl['kind'] == 'near']
+    if nr.empty or 'off' not in nr:
+        return
+    print('\n── DIAGNOSTIC: +/-20min draws, split by side of the signal')
+    print(f"  {'draw':>16}{'n':>7}" + ''.join(f'{f"h{h}m":>10}' for h in horizons))
+    print('  ' + '-' * (23 + 10 * len(horizons)))
+    for label, mask in (('BEFORE signal', nr['off'] < 0), ('AFTER signal', nr['off'] > 0)):
+        sub = nr[mask]
+        if len(sub) < 10:
+            continue
+        cells = ''.join(_f(np.nanmean(sub[f'h{h}'].to_numpy(dtype=float)), 10)
+                        for h in horizons)
+        print(f'  {label:>16}{len(sub):>7}{cells}')
+    print('  BEFORE-draws have forward windows that end at the signal, so they count')
+    print('  the run-up. That is why they are excluded from every edge and p above.')
 
 
 def _f(x, w, p=3):
@@ -262,15 +356,14 @@ def table(title: str, rows: list) -> None:
         print('  (too few observations)')
         return
     print(f"  {'horizon':>8}{'n':>6}{'sig mean':>10}{'sig med':>9}{'win%':>7}"
-          f"{'rand':>9}{'near':>9}{'edge':>9}{'p':>6}")
-    print('  ' + '-' * 73)
+          f"{'rand':>9}{'edge':>9}{'p':>6}")
+    print('  ' + '-' * 64)
     for r in rows:
         edge = ('' if not np.isfinite(r['edge']) else f"{r['edge']:>+9.3f}")
         print(f"  {r['h']:>7}m{r['n']:>6}{_f(r['mean'], 10)}{_f(r['med'], 9)}"
-              f"{_f(r['win'], 7, 0)}{_f(r['rand'], 9)}{_f(r['near'], 9)}"
+              f"{_f(r['win'], 7, 0)}{_f(r['rand'], 9)}"
               f"{edge:>9}{_f(r['p'], 6, 0)}")
-    print(f'  breakeven after charges: +{BREAKEVEN_PCT:.2f}%  '
-          f'(edge must clear this, not zero)')
+    print(f'  edge is vs `rand`; breakeven after charges +{BREAKEVEN_PCT:.2f}%')
 
 
 def main() -> int:
@@ -296,6 +389,7 @@ def main() -> int:
     print(f'controls: {len(ctrl[ctrl["kind"] == "rand"]):,} random / '
           f'{len(ctrl[ctrl["kind"] == "near"]):,} time-matched draws')
 
+    runup_table(sig, ctrl, horizons)
     table('ALL SIGNALS', build(sig, ctrl, horizons, rng))
 
     for d in sorted(sig['date'].unique()):
@@ -323,17 +417,21 @@ def main() -> int:
         h10 = h10[np.isfinite(h10)]
         w10 = 100.0 * (h10 > 0).mean() if len(h10) else np.nan
         print(f'  {f"{lo:.1f}-{hi:.1f}":>12}{len(sub):>7}{cells}{_f(w10, 9, 0)}')
-    nr = ctrl[ctrl['kind'] == 'near']
-    cells = ''.join(_f(np.nanmean(nr[f'h{h}'].to_numpy(dtype=float)), 10)
+    rnd = ctrl[ctrl['kind'] == 'rand']
+    cells = ''.join(_f(np.nanmean(rnd[f'h{h}'].to_numpy(dtype=float)), 10)
                     for h in horizons)
-    print(f'  {"CONTROL":>12}{len(nr):>7}{cells}')
+    print(f'  {"rand CONTROL":>12}{len(rnd):>7}{cells}')
     print('  A real strength signal makes these rows INCREASE downward, away from')
-    print('  the CONTROL row. Flat or decreasing means the ratio carries nothing.')
+    print('  the control row. Flat or decreasing means the ratio carries nothing.')
+    print('  Bucket-vs-bucket is the safe comparison here; the buckets are not')
+    print('  matched on time of day, so a monotone column could still be a clock.')
+
+    near_split(ctrl, horizons)
 
     print('\nHow to read p: the percentile of the signal mean inside a bootstrap of')
-    print('TIME-MATCHED control means at the same n. ~50 = the signal sits exactly')
-    print('where chance puts it. Only <5 or >95 is worth a second look, and even then')
-    print(f'the edge must exceed +{BREAKEVEN_PCT:.2f}% to make money.')
+    print('`rand` control means at the same n. ~50 = the signal sits exactly where')
+    print('chance puts it. Only <5 or >95 is worth a second look, and even then the')
+    print(f'edge must exceed +{BREAKEVEN_PCT:.2f}% to make money.')
     return 0
 
 
