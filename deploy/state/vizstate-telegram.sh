@@ -25,19 +25,24 @@ REPO="${VIZSIGNALS_DIR:-/home/ubuntu/viz_signals}"
 PY="${VIZSIGNALS_PY:-$REPO/.venv/bin/python}"
 MAXLEN=3800          # Telegram caps a message at 4096; leave room for the wrapper
 
-# The Telegram credentials live in viz_hedge/.env — that is where the alerter reads
-# them from. Defaulting to viz_signals/.env made this unit fail on first start with
-# "TELEGRAM_BOT_TOKEN/CHAT_ID missing". Search both rather than picking one, so it
-# keeps working whichever repo the keys end up in.
+# THE KEY IS TELEGRAM_TOKEN, NOT TELEGRAM_BOT_TOKEN.
+# src/config/settings.py:294 reads TELEGRAM_TOKEN. The first two versions of this
+# script looked for TELEGRAM_BOT_TOKEN, a name that exists nowhere in either repo —
+# invented, then propagated from the alerter into here without either being checked
+# against the settings that actually consume it.
+# Both spellings and both .env files are searched, so it works wherever the keys are.
 ENV_CANDIDATES=("${VIZSIGNALS_ENV:-}" "$REPO/.env" \
                 "${VIZHEDGE_DIR:-/home/ubuntu/viz_hedge}/.env")
+TOKEN_KEYS=(TELEGRAM_TOKEN TELEGRAM_BOT_TOKEN)
 ENV_FILE=''
 for f in "${ENV_CANDIDATES[@]}"; do
-    [ -n "$f" ] && [ -r "$f" ] && grep -q '^TELEGRAM_BOT_TOKEN=' "$f" 2>/dev/null \
-        && { ENV_FILE="$f"; break; }
+    [ -n "$f" ] && [ -r "$f" ] || continue
+    for k in "${TOKEN_KEYS[@]}"; do
+        grep -q "^${k}=" "$f" 2>/dev/null && { ENV_FILE="$f"; break 2; }
+    done
 done
 if [ -z "$ENV_FILE" ]; then
-    echo "vizstate: no TELEGRAM_BOT_TOKEN found in any of:" >&2
+    echo "vizstate: no ${TOKEN_KEYS[*]} found in any of:" >&2
     for f in "${ENV_CANDIDATES[@]}"; do [ -n "$f" ] && echo "    $f" >&2; done
     exit 1
 fi
@@ -56,10 +61,14 @@ get() {
       | tr -d '\r'
 }
 
-TOKEN="$(get TELEGRAM_BOT_TOKEN)"
+TOKEN=''
+for k in "${TOKEN_KEYS[@]}"; do
+    TOKEN="$(get "$k")"
+    [ -n "$TOKEN" ] && break
+done
 CHAT="$(get TELEGRAM_CHAT_ID)"
 if [ -z "$TOKEN" ] || [ -z "$CHAT" ]; then
-    echo "vizstate: TELEGRAM_BOT_TOKEN/CHAT_ID missing from $ENV_FILE" >&2
+    echo "vizstate: token or chat id empty in $ENV_FILE" >&2
     exit 1
 fi
 
