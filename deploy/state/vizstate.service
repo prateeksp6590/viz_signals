@@ -7,7 +7,9 @@ Type=oneshot
 User=ubuntu
 # /bin/bash, NOT the script path — scp from Windows drops the exec bit, which is
 # exactly the 203/EXEC that killed prep_day.sh twice.
-ExecStart=/bin/bash /home/ubuntu/viz_signals/deploy/state/vizstate-telegram.sh
+# --narrow: Telegram's <pre> does not scroll on mobile, so the 78-column table
+# soft-wraps mid-number and becomes unreadable. Terminal and HTML keep the wide one.
+ExecStart=/bin/bash /home/ubuntu/viz_signals/deploy/state/vizstate-telegram.sh --narrow
 TimeoutStartSec=120
 # a failed post should announce itself rather than just stopping
 OnFailure=vizhedge-alert@%n.service

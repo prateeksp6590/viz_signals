@@ -88,6 +88,21 @@ def mcx_front(master_dir: Path, names) -> list:
             if not key.startswith('MCX'):
                 continue
             sym = str(r.get('trading_symbol') or '').upper()
+            # FUTURES ONLY. Matching on the commodity name alone also catches
+            # options — the first version returned "CRUDEOILM 11200 CE 17 SEP" at
+            # 0.00, an illiquid far strike, and presented it as the front-month
+            # future. Same trap generate_option_chain.py documents: futures carry no
+            # strike, so an option filter must not be reused for them.
+            itype = str(r.get('instrument_type') or '').upper()
+            if itype and not itype.startswith('FUT'):
+                continue
+            if not itype and (' CE ' in f' {sym} ' or ' PE ' in f' {sym} '):
+                continue
+            try:
+                if float(r.get('strike_price') or 0) > 0:
+                    continue
+            except (TypeError, ValueError):
+                pass
             for n in names:
                 if sym.startswith(n):
                     exp = None
@@ -237,6 +252,63 @@ def option_state(date_str: str, segment: str, underlying: str) -> dict:
             'strikes': len(by_strike)}
 
 
+NARROW_W = 34
+
+
+def render_narrow(now, vix_now, pct, trends, mcx_rows, opt, underlying) -> str:
+    """A phone-shaped layout, ~34 chars wide.
+
+    The 78-column table is unreadable on Telegram: <pre> does not scroll on the
+    Android client, so every row soft-wraps mid-number and a header lands two lines
+    away from its data. Rather than shrink the columns, the values go vertical —
+    one instrument per block, labels beside numbers instead of above them.
+    """
+    L = []
+    L.append('MARKET STATE')
+    L.append(f'{now:%d %b %H:%M} IST')
+    L.append('-' * NARROW_W)
+
+    if vix_now is None:
+        L.append('VIX  unavailable')
+    else:
+        L.append(f'VIX {vix_now:6.2f}   {pct:.0f}th pct')
+        L.append('  ABOVE 17.4 - do not sell' if vix_now >= VIX_CAUTION
+                 else '  below 17.4 - in range')
+    L.append('')
+
+    for name, t in trends.items():
+        L.append(f'{name[:10]:<10}{t["last"]:>12,.1f}')
+        L.append(f'  1d {t["r1"]:+6.2f}  5d {t["r5"]:+6.2f}')
+        L.append(f'  20d{t["r20"]:+6.2f}  MA20{t["vs_ma20"]:+6.2f}')
+        L.append(f'  range {t["range_pos"]:.0f}%   {t["bias"].upper()}')
+        L.append('')
+
+    if mcx_rows:
+        L.append('MCX front-month')
+        for nm, sym, v in mcx_rows:
+            L.append(f'  {nm[:11]:<11}'
+                     + (f'{v:>13,.1f}' if v is not None else f'{"no quote":>13}'))
+        L.append('  (API trading disabled)')
+        L.append('')
+
+    L.append(f'{underlying} OPTIONS')
+    if opt.get('error'):
+        L.append(f'  n/a: {str(opt["error"])[:26]}')
+    else:
+        L.append(f'  PCR {opt["pcr"]:.2f}'
+                 + (f'   ATM {opt["atm"]:,.0f}' if opt.get('atm') else ''))
+        if np.isfinite(opt.get('ce_iv', np.nan)):
+            L.append(f'  IV  CE {opt["ce_iv"]:.1f}  PE {opt["pe_iv"]:.1f}')
+            L.append(f'  skew {opt["pe_iv"] - opt["ce_iv"]:+.2f}')
+        if opt.get('top_ce'):
+            L.append(f'  CE wall {opt["top_ce"][0][1]:,.0f}')
+        if opt.get('top_pe'):
+            L.append(f'  PE wall {opt["top_pe"][0][1]:,.0f}')
+    L.append('-' * NARROW_W)
+    L.append('state, not signals')
+    return '\n'.join(L)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -246,6 +318,9 @@ def main() -> int:
     ap.add_argument('--segment', default='BSE_FO')
     ap.add_argument('--underlying', default='SENSEX')
     ap.add_argument('--master-dir', default=None)
+    ap.add_argument('--narrow', action='store_true',
+                    help='~34-char vertical layout for phones (Telegram wraps the '
+                         'wide one into unreadable soft-wrapped rows)')
     a = ap.parse_args()
 
     token = load_token()
@@ -293,6 +368,7 @@ def main() -> int:
 
     # ---- MCX -------------------------------------------------------------
     out += ['', 'MCX FRONT-MONTH', '-' * 78]
+    mcx_rows = []
     mdir = find_master_dir(a.master_dir)
     if not mdir:
         out.append('  instrument master not found — pass --master-dir')
@@ -308,6 +384,7 @@ def main() -> int:
                 out.append(f'  quotes unavailable: {str(e)[:70]}')
             for nm, sym, key in legs:
                 v = q.get(key)
+                mcx_rows.append((nm, sym, v))
                 out.append(f'  {nm:<14}{sym[:26]:<28}'
                            + (f'{v:>12,.2f}' if v is not None else f'{"no quote":>12}'))
             out.append('  NOTE: Upstox API trading on MCX is currently disabled '
@@ -335,7 +412,11 @@ def main() -> int:
     out += ['', '=' * 78,
             'State, not signals. Nothing here is a trigger — see',
             'docs/shaaru-aureus-manual-trading-rulebook.md for what to do with it.']
-    text = '\n'.join(out)
+
+    if a.narrow:
+        text = render_narrow(now, vix_now, pct, trends, mcx_rows, o, a.underlying)
+    else:
+        text = '\n'.join(out)
     print(text)
 
     if a.html:
