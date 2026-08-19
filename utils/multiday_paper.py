@@ -171,6 +171,44 @@ def pnl(legs: list, qty: int, marks: dict) -> tuple:
     return gross, chg, rows
 
 
+def dte_of(expiry: str):
+    for fmt in ('%d %b %y', '%d %B %y', '%d %b %Y'):
+        try:
+            e = datetime.strptime(expiry.strip().title(), fmt).date()
+            return (e - datetime.now(IST).date()).days
+        except ValueError:
+            continue
+    return None
+
+
+def check_dte(expiry: str, min_dte: int, force: bool) -> None:
+    """Refuse a near-expiry structure unless it is asked for explicitly.
+
+    The variance premium was measured at 5-21 day horizons (vix_premium.py:
+    +2.37/+2.10/+2.02 vol points at n=5/10/21). A 1-DTE condor is not a small
+    version of that trade — gamma dominates, the premium collected is tiny, and a
+    move through the short strike cannot be recovered by time. Opening one and
+    reading the result as evidence about the premium would compare two unrelated
+    things.
+
+    It is also the easy mistake to make: the default expiry goes stale every week,
+    so whatever was current when the flag was written becomes 1 DTE a few days later.
+    """
+    d = dte_of(expiry)
+    if d is None:
+        print(f'  could not parse expiry "{expiry}" — proceeding without a DTE check')
+        return
+    if d < 0:
+        raise SystemExit(f'"{expiry}" expired {-d} day(s) ago.')
+    if d < min_dte and not force:
+        raise SystemExit(
+            f'\n"{expiry}" is {d} day(s) out; the premium was measured over 5-21 days.\n'
+            f'At {d} DTE this is a gamma trade, not a vol-premium trade, and its P&L\n'
+            f'says nothing about the research.\n'
+            f'  -> pick the next expiry, or pass --force to open it anyway.')
+    print(f'  {d} days to expiry')
+
+
 def state_path(name: str) -> Path:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     return STATE_DIR / f'{name}.json'
@@ -180,6 +218,7 @@ def cmd_open(a) -> int:
     mdir = find_master_dir(a.master_dir)
     if not mdir:
         return print('instrument master not found; pass --master-dir') or 1
+    check_dte(a.expiry, a.min_dte, a.force)
     ch = chain(mdir, a.underlying, a.expiry)
     if not ch:
         return print(f'no {a.underlying} contracts for expiry "{a.expiry}"') or 1
@@ -300,6 +339,10 @@ def main() -> int:
             s.add_argument('--wing', type=float, default=300.0)
             s.add_argument('--lots', type=int, default=1)
             s.add_argument('--master-dir', default=None)
+            s.add_argument('--min-dte', type=int, default=3,
+                           help='refuse nearer expiries (premium measured at 5-21d)')
+            s.add_argument('--force', action='store_true',
+                           help='open inside --min-dte anyway')
     a = ap.parse_args()
     return {'open': cmd_open, 'mark': cmd_mark, 'close': cmd_close}[a.cmd](a)
 
