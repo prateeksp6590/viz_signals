@@ -22,9 +22,25 @@
 set -uo pipefail
 
 REPO="${VIZSIGNALS_DIR:-/home/ubuntu/viz_signals}"
-ENV_FILE="${VIZSIGNALS_ENV:-$REPO/.env}"
 PY="${VIZSIGNALS_PY:-$REPO/.venv/bin/python}"
 MAXLEN=3800          # Telegram caps a message at 4096; leave room for the wrapper
+
+# The Telegram credentials live in viz_hedge/.env — that is where the alerter reads
+# them from. Defaulting to viz_signals/.env made this unit fail on first start with
+# "TELEGRAM_BOT_TOKEN/CHAT_ID missing". Search both rather than picking one, so it
+# keeps working whichever repo the keys end up in.
+ENV_CANDIDATES=("${VIZSIGNALS_ENV:-}" "$REPO/.env" \
+                "${VIZHEDGE_DIR:-/home/ubuntu/viz_hedge}/.env")
+ENV_FILE=''
+for f in "${ENV_CANDIDATES[@]}"; do
+    [ -n "$f" ] && [ -r "$f" ] && grep -q '^TELEGRAM_BOT_TOKEN=' "$f" 2>/dev/null \
+        && { ENV_FILE="$f"; break; }
+done
+if [ -z "$ENV_FILE" ]; then
+    echo "vizstate: no TELEGRAM_BOT_TOKEN found in any of:" >&2
+    for f in "${ENV_CANDIDATES[@]}"; do [ -n "$f" ] && echo "    $f" >&2; done
+    exit 1
+fi
 
 # The whitespace strip runs TWICE — before and after the quotes come off. Otherwise
 # VALUE="  -100999  " unquotes to "  -100999  " with the padding intact, because the
