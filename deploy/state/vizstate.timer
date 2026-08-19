@@ -1,0 +1,19 @@
+[Unit]
+Description=Market state to Telegram, weekday mornings and mid-session
+
+[Timer]
+# TIMES ARE IN THE SYSTEM TIMEZONE. systemd 249 (Ubuntu 22.04) does NOT support an
+# OnCalendar timezone suffix, so check the box first:
+#     timedatectl | grep 'Time zone'
+# If it reports Asia/Kolkata, these are 09:10 and 13:30 IST and are correct.
+# If it reports UTC, either run:  sudo timedatectl set-timezone Asia/Kolkata
+# or replace the two lines below with their UTC equivalents:
+#     OnCalendar=Mon..Fri 03:40      # 09:10 IST
+#     OnCalendar=Mon..Fri 08:00      # 13:30 IST
+OnCalendar=Mon..Fri 09:10
+OnCalendar=Mon..Fri 13:30
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
