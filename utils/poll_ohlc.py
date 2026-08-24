@@ -377,7 +377,8 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--instruments', help='comma-separated keys (default: '
                                           'ANALYZE_INSTRUMENTS)')
-    ap.add_argument('--bucket', default='ohlcv')
+    # ohlcv_data, matching the tick_data naming convention
+    ap.add_argument('--bucket', default=os.getenv('OHLCV_BUCKET', 'ohlcv_data'))
     ap.add_argument('--chunk', type=int, default=100)
     ap.add_argument('--vix', action='store_true', default=True,
                     help='include NSE_INDEX|India VIX (default on)')
