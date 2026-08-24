@@ -52,9 +52,11 @@ import argparse
 import os
 import sys
 import time
+from collections import deque
 from datetime import datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import requests
 
 # MUST be first: settings.py reads os.environ and never loads .env, so without this
@@ -126,6 +128,31 @@ MAX_CONSECUTIVE_FAIL = 5  # then exit non-zero and let OnFailure alert
 GAP_WARN_MINUTES = int(os.getenv('OHLC_GAP_WARN', '2'))
 GAP_SUMMARY_EVERY = int(os.getenv('OHLC_GAP_SUMMARY_EVERY', '60'))   # polls
 
+# ── Savitzky-Golay on the OHLC mean ──────────────────────────────────────────
+# THE STORED FIELD IS `mean_sg_causal`, NOT `denoised_mean`, AND THE NAME IS THE
+# WARNING. scipy.savgol_filter is CENTRED: a window of 21 smooths each point using
+# 10 samples BEFORE and 10 AFTER it. Measured on a random walk (sd 8.44): changing
+# only the data after index 110 moved the centred value there by -2.795. Live, those
+# ten future minutes do not exist, so the notebook's number is not computable here.
+#
+# What is stored instead is the TRAILING-EDGE fit: the same degree-3 polynomial over
+# the last 21 samples, evaluated at the newest one. Strictly causal, and it matches
+# scipy's own last-point value to 4e-13. It is NOT equal to the centred value —
+# correlation 0.991, mean absolute difference 0.70 on that same series. Plot them
+# together and they diverge; use one where the research used the other and the
+# backtest is quietly measuring something else.
+#
+# The fit uses ACTUAL TIMESTAMPS rather than assuming evenly spaced minutes, because
+# thin MCX strikes skip minutes routinely (measured 2026-08-24: NATURALGAS 260 and
+# CRUDEOILM 8200 options missed ~15% of them). With even spacing this reduces
+# exactly to the fixed-coefficient form; with gaps it stays correct instead of
+# silently fitting a cubic to the wrong x-axis.
+SG_WINDOW = int(os.getenv('OHLC_SG_WINDOW', '21'))
+SG_ORDER = int(os.getenv('OHLC_SG_ORDER', '3'))
+# 21 samples nominally span 20 minutes. Beyond this the window straddles so much
+# dead time that a cubic through it is extrapolation, so no value is written.
+SG_MAX_SPAN_MIN = float(os.getenv('OHLC_SG_MAX_SPAN', '40'))
+
 
 def _now() -> datetime:
     return datetime.now(IST)
@@ -143,6 +170,35 @@ class OhlcPoller:
         self._last_ts: dict[str, int] = {}
         self.gaps: list[str] = []          # only gaps >= GAP_WARN_MINUTES
         self.missed: dict[str, int] = {}   # every missing minute, for the summary
+        # rolling (ts_ms, ohlc_mean) per instrument for the trailing SavGol fit
+        self._hist: dict[str, deque] = {}
+
+    @staticmethod
+    def sg_causal(hist):
+        """Degree-SG_ORDER fit over the last SG_WINDOW samples, evaluated at the
+        NEWEST one. -> (value, span_minutes) or (None, span).
+
+        Causal by construction: `hist` only ever holds samples already received, and
+        the polynomial is evaluated at x=0, the latest point. No future sample can
+        reach it, which is the whole difference from the centred filter.
+        """
+        if len(hist) < SG_WINDOW:
+            return None, None
+        ts = np.fromiter((t for t, _ in hist), float, len(hist))
+        ys = np.fromiter((m for _, m in hist), float, len(hist))
+        if not np.all(np.isfinite(ys)):
+            return None, None
+        x = (ts - ts[-1]) / 60_000.0          # minutes relative to the newest point
+        span = float(-x[0])
+        if span > SG_MAX_SPAN_MIN:
+            return None, span
+        try:
+            A = np.vander(x, SG_ORDER + 1, increasing=True)
+            coef, *_ = np.linalg.lstsq(A, ys, rcond=None)
+        except np.linalg.LinAlgError:
+            return None, span
+        v = float(coef[0])                    # the polynomial evaluated at x = 0
+        return (v if np.isfinite(v) else None), span
 
     # ---------------------------------------------------------------- transport
     def _get(self, url: str, keys: list) -> dict:
@@ -198,20 +254,32 @@ class OhlcPoller:
                             f'{datetime.fromtimestamp(ts / 1000, IST):%H:%M}')
             self._last_ts[key] = ts
 
-            out.append({
+            o = float(candle.get('open') or close)
+            h = float(candle.get('high') or close)
+            lo = float(candle.get('low') or close)
+            cl = float(close)
+            mean = (o + h + lo + cl) / 4.0
+
+            hist = self._hist.setdefault(key, deque(maxlen=SG_WINDOW))
+            hist.append((ts, mean))
+            sg, span = self.sg_causal(hist)
+
+            row = {
                 'instrument_key': key,
                 'symbol': self.name_of(key),
                 'measurement': self.measurement_of(key),
                 'ts_start': ts,
                 # right edge: the candle [ts, ts+60s) is labelled at its END
                 'time_ns': (ts + 60_000) * 1_000_000,
-                'open': float(candle.get('open') or close),
-                'high': float(candle.get('high') or close),
-                'low': float(candle.get('low') or close),
-                'close': float(close),
+                'open': o, 'high': h, 'low': lo, 'close': cl,
                 'volume': float(candle.get('volume') or 0.0),
                 'last_price': float(node.get('last_price') or close),
-            })
+                'ohlc_mean': mean,
+            }
+            if sg is not None:
+                row['mean_sg_causal'] = sg
+                row['sg_span_min'] = span
+            out.append(row)
         return out
 
     def name_of(self, key: str) -> str:
@@ -263,7 +331,14 @@ def write_influx(rows: list, bucket: str) -> int:
              .field('open', r['open']).field('high', r['high'])
              .field('low', r['low']).field('close', r['close'])
              .field('volume', r['volume']).field('ts_start', float(r['ts_start']))
+             .field('ohlc_mean', r['ohlc_mean'])
              .time(r['time_ns'], WritePrecision.NS))
+        # absent for the first SG_WINDOW-1 candles of a run, and whenever the window
+        # straddles too much dead time. Absent is deliberate: a degraded value that
+        # looks like the real one is worse than no value.
+        if 'mean_sg_causal' in r:
+            p = p.field('mean_sg_causal', r['mean_sg_causal'])
+            p = p.field('sg_span_min', r['sg_span_min'])
         pts.append(p)
     if not pts:
         return 0
