@@ -116,6 +116,16 @@ def any_open(keys, when=None) -> bool:
 POLL_OFFSET_SECS = 5      # poll at :05 past the minute so prev_ohlc is settled
 MAX_CONSECUTIVE_FAIL = 5  # then exit non-zero and let OnFailure alert
 
+# A ONE-MINUTE GAP ON A THIN CONTRACT IS NOT NEWS — it means nobody traded that
+# minute, the API did not advance prev_ohlc.ts, and dedup correctly wrote nothing.
+# Measured on 2026-08-24: CRUDEOILM 8200 and NATURALGAS 260 options produced ~15
+# such lines in 20 minutes while SILVERM (658-3,700 lots/min) produced none.
+# Logging each one individually buries the gaps that DO matter — a 5-minute hole
+# from an expired token looks identical in a stream of hundreds. So single-minute
+# gaps are counted and summarised; anything longer is printed the moment it happens.
+GAP_WARN_MINUTES = int(os.getenv('OHLC_GAP_WARN', '2'))
+GAP_SUMMARY_EVERY = int(os.getenv('OHLC_GAP_SUMMARY_EVERY', '60'))   # polls
+
 
 def _now() -> datetime:
     return datetime.now(IST)
@@ -131,7 +141,8 @@ class OhlcPoller:
         self.interval = interval
         self.http = session or requests.Session()
         self._last_ts: dict[str, int] = {}
-        self.gaps: list[str] = []
+        self.gaps: list[str] = []          # only gaps >= GAP_WARN_MINUTES
+        self.missed: dict[str, int] = {}   # every missing minute, for the summary
 
     # ---------------------------------------------------------------- transport
     def _get(self, url: str, keys: list) -> dict:
@@ -178,9 +189,13 @@ class OhlcPoller:
                     continue                        # same candle polled twice
                 missed = (ts - prev) // 60_000 - 1
                 if missed > 0:
-                    self.gaps.append(f'{self.name_of(key)}: {missed} minute(s) '
-                                     f'missing before '
-                                     f'{datetime.fromtimestamp(ts / 1000, IST):%H:%M}')
+                    name = self.name_of(key)
+                    self.missed[name] = self.missed.get(name, 0) + missed
+                    # only surface the ones that are not just a quiet minute
+                    if missed >= GAP_WARN_MINUTES:
+                        self.gaps.append(
+                            f'{name}: {missed} minute(s) missing before '
+                            f'{datetime.fromtimestamp(ts / 1000, IST):%H:%M}')
             self._last_ts[key] = ts
 
             out.append({
@@ -416,7 +431,7 @@ def main() -> int:
     last_close = max(EXCHANGE_CLOSE.get(e, dt_time(15, 40)) for e in by_exch) \
         if by_exch else dt_time(15, 40)
 
-    fails = 0
+    fails = polls = 0
     while True:
         if not (a.ignore_hours or any_open(keys)):
             if a.once:
@@ -458,6 +473,12 @@ def main() -> int:
                               f'V {r["volume"]:>9,.0f}')
                 while poller.gaps:
                     print(f'  GAP: {poller.gaps.pop(0)}', file=sys.stderr)
+                polls += 1
+                if polls % GAP_SUMMARY_EVERY == 0 and poller.missed:
+                    top = sorted(poller.missed.items(), key=lambda x: -x[1])[:5]
+                    print(f'  quiet minutes over the last {GAP_SUMMARY_EVERY} polls: '
+                          + ', '.join(f'{n} {c}' for n, c in top))
+                    poller.missed.clear()
         except SystemExit:
             raise
         except Exception as e:
