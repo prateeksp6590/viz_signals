@@ -349,18 +349,29 @@ def report(df: pd.DataFrame, holds, step) -> None:
         print('3. BY DAYS TO EXPIRY   (theta and gamma both explode near expiry —')
         print('   pooling these averages two unrelated regimes)')
         print('=' * 78)
-        print(f"  {'DTE':>5}{'hold':>7}{'indep':>7}{'net/wk':>10}{'median':>9}"
-              f"{'win%':>7}{'worst':>10}")
-        print('  ' + '-' * 55)
+        print(f"  {'DTE':>5}{'hold':>7}{'days':>6}{'indep':>7}{'net/wk':>10}"
+              f"{'median':>9}{'win%':>7}{'worst':>10}")
+        print('  ' + '-' * 61)
+        thin_dte = False
         for d in sorted(df['dte'].dropna().unique()):
             for H in holds:
-                ind = independent(df[(df['H'] == H) & (df['dte'] == d)], H, step)
+                sub = df[(df['H'] == H) & (df['dte'] == d)]
+                ind = independent(sub, H, step)
                 if len(ind) < 3:
                     continue
+                ndays = sub['date'].nunique()
+                thin_dte = thin_dte or ndays < 3
                 net = (ind['gross'] - ind['chg']).values
-                print(f'  {int(d):>5}{H:>6}m{len(ind):>7}{net.mean():>10,.0f}'
+                print(f'  {int(d):>5}{H:>6}m{ndays:>6}{len(ind):>7}{net.mean():>10,.0f}'
                       f'{np.median(net):>9,.0f}{100 * (net > 0).mean():>7.0f}'
                       f'{net.min():>10,.0f}')
+        if thin_dte:
+            print('\n  *** THE `days` COLUMN IS THE ONE THAT MATTERS HERE. ***')
+            print('  A DTE bucket built from ONE session is not a DTE effect, it is')
+            print('  that day. With a 375-minute session and a 60-minute hold you get')
+            print('  ~6 "independent" windows out of a single day — they share the same')
+            print('  open, the same news and the same regime, so the row is n=1 dressed')
+            print('  up as n=6. Do not change a DTE rule on any row showing days < 3.')
 
     print('\n' + '=' * 78)
     print('HOW MANY INDEPENDENT WINDOWS WOULD YOU NEED?')

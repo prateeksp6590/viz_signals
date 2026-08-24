@@ -339,7 +339,10 @@ def main() -> int:
             s.add_argument('--wing', type=float, default=300.0)
             s.add_argument('--lots', type=int, default=1)
             s.add_argument('--master-dir', default=None)
-            s.add_argument('--min-dte', type=int, default=3,
+            # 5, not 3, to match Part A of the rulebook. The default was 3 while the
+            # rulebook said 5-21, so the script would have permitted a trade the
+            # rules forbid — and the log would have recorded it as compliant.
+            s.add_argument('--min-dte', type=int, default=5,
                            help='refuse nearer expiries (premium measured at 5-21d)')
             s.add_argument('--force', action='store_true',
                            help='open inside --min-dte anyway')
