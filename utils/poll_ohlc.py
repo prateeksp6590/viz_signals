@@ -49,6 +49,7 @@ Chunking defaults to 100 to keep the URL a sane length, not because of throughpu
 """
 
 import argparse
+import os
 import sys
 import time
 from datetime import datetime, time as dt_time, timedelta, timezone
@@ -67,10 +68,50 @@ IST = timezone(timedelta(hours=5, minutes=30))
 OHLC_URL = 'https://api.upstox.com/v3/market-quote/ohlc'
 GREEK_URL = 'https://api.upstox.com/v3/market-quote/option-greek'
 
-# 15:40 since 2026-08-03 (Closing Auction Session). See influx_writer.NSE_BSE_CLOSE.
-MARKET_OPEN = dt_time(9, 15)
-MARKET_CLOSE = dt_time(15, 40)
+# PER-EXCHANGE HOURS, NOT ONE WINDOW.
+# MCX trades 09:00-23:30; NSE/BSE derivatives 09:15-15:40 (15:40 since the Closing
+# Auction Session took effect 2026-08-03 — see influx_writer.NSE_BSE_CLOSE).
+# A single 09:15-15:40 window would silently drop ~8 hours of commodity candles
+# every day while appearing to work, which is precisely the shape of the
+# NSE_BSE_CLOSE bug that cost 13 sessions of closing data. Open at 09:00 for MCX.
+SESSION_OPEN = os.getenv('POLL_SESSION_OPEN', '09:00')
+EXCHANGE_CLOSE_RAW = os.getenv('POLL_EXCHANGE_CLOSE',
+                               'NSE:15:40,BSE:15:40,MCX:23:30')
 VIX_KEY = 'NSE_INDEX|India VIX'
+
+
+def _hhmm(s: str, default: dt_time) -> dt_time:
+    try:
+        h, m = str(s).strip().split(':')
+        return dt_time(int(h), int(m))
+    except Exception:
+        return default
+
+
+MARKET_OPEN = _hhmm(SESSION_OPEN, dt_time(9, 0))
+EXCHANGE_CLOSE = {}
+for _p in EXCHANGE_CLOSE_RAW.split(','):
+    _b = _p.split(':')
+    if len(_b) == 3:
+        EXCHANGE_CLOSE[_b[0].strip().upper()] = _hhmm(f'{_b[1]}:{_b[2]}',
+                                                      dt_time(15, 40))
+
+
+def exchange_of(key: str) -> str:
+    """BSE_FO|123 -> BSE, NSE_INDEX|India VIX -> NSE, MCX_FO|9 -> MCX."""
+    return str(key).split('|')[0].split('_')[0].upper()
+
+
+def key_open(key: str, when=None) -> bool:
+    n = when or _now()
+    if n.weekday() >= 5:
+        return False
+    close = EXCHANGE_CLOSE.get(exchange_of(key), dt_time(15, 40))
+    return MARKET_OPEN <= n.time() <= close
+
+
+def any_open(keys, when=None) -> bool:
+    return any(key_open(k, when) for k in keys)
 
 POLL_OFFSET_SECS = 5      # poll at :05 past the minute so prev_ohlc is settled
 MAX_CONSECUTIVE_FAIL = 5  # then exit non-zero and let OnFailure alert
@@ -78,11 +119,6 @@ MAX_CONSECUTIVE_FAIL = 5  # then exit non-zero and let OnFailure alert
 
 def _now() -> datetime:
     return datetime.now(IST)
-
-
-def market_open_now() -> bool:
-    n = _now()
-    return n.weekday() < 5 and MARKET_OPEN <= n.time() <= MARKET_CLOSE
 
 
 class OhlcPoller:
@@ -179,12 +215,22 @@ class OhlcPoller:
         seg, _, tok = str(key).partition('|')
         return f'{seg}_{tok}' if tok else str(key)
 
-    def poll_once(self) -> list:
+    def due_keys(self, ignore_hours: bool = False) -> list:
+        """Only instruments whose own exchange is still trading.
+
+        Asking Upstox for an NSE index at 20:00 returns its stale 15:29 candle
+        forever; dedup drops it, but it wastes the request and — worse — makes the
+        summary line show a candle time that has nothing to do with the MCX rows
+        beside it."""
+        return self.keys if ignore_hours else [k for k in self.keys if key_open(k)]
+
+    def poll_once(self, ignore_hours: bool = False) -> list:
+        keys = self.due_keys(ignore_hours)
         rows = []
-        for i in range(0, len(self.keys), self.chunk):
-            batch = self.keys[i:i + self.chunk]
+        for i in range(0, len(keys), self.chunk):
+            batch = keys[i:i + self.chunk]
             rows.extend(self.parse(self._get(OHLC_URL, batch)))
-            if i + self.chunk < len(self.keys):
+            if i + self.chunk < len(keys):
                 time.sleep(0.05)                    # nowhere near 25/s, but be polite
         return rows
 
@@ -228,17 +274,44 @@ def load_token() -> str:
     raise SystemExit(f'No token: set UPSTOX_ACCESS_TOKEN or provide {f}')
 
 
+def env_list(path: Path, key: str) -> list:
+    """Comma-separated value out of a .env, without sourcing it.
+
+    SUBSCRIBE_INSTRUMENTS contains '|' in every entry, so `source` would try to
+    pipe them as shell commands."""
+    try:
+        for line in Path(path).read_text(encoding='utf-8').splitlines():
+            if line.startswith(f'{key}='):
+                v = line.split('=', 1)[1].split('#')[0].strip().strip('"\'')
+                return [x.strip() for x in v.split(',') if x.strip()]
+    except OSError:
+        pass
+    return []
+
+
 def load_keys(args) -> list:
-    keys = []
+    """Everything the FEEDER subscribes to, not just what vizsignals analyses.
+
+    ANALYZE_INSTRUMENTS is the SENSEX chain the engine scores. SUBSCRIBE_INSTRUMENTS
+    is the full feed — NSE, BSE and MCX. For an OHLC archive we want the latter, so
+    viz_hedge's .env is the primary source and vizsignals' settings is the fallback.
+    """
+    import os as _os
     if args.instruments:
         keys = [k.strip() for k in args.instruments.split(',') if k.strip()]
     else:
-        keys = list(getattr(settings, 'ANALYZE_INSTRUMENTS', []) or [])
-    if args.vix:
+        hedge = Path(_os.getenv('VIZHEDGE_DIR', str(Path.home() / 'viz_hedge')))
+        keys = env_list(hedge / '.env', 'SUBSCRIBE_INSTRUMENTS')
+        src = f'{hedge}/.env SUBSCRIBE_INSTRUMENTS'
+        if not keys:
+            keys = list(getattr(settings, 'ANALYZE_INSTRUMENTS', []) or [])
+            src = 'settings.ANALYZE_INSTRUMENTS'
+        print(f'  instruments from {src}')
+    if args.vix and VIX_KEY not in keys:
         keys.append(VIX_KEY)
     if not keys:
-        raise SystemExit('No instruments. Set ANALYZE_INSTRUMENTS or pass '
-                         '--instruments.')
+        raise SystemExit('No instruments. Pass --instruments, or set '
+                         'SUBSCRIBE_INSTRUMENTS in viz_hedge/.env.')
     return keys
 
 
@@ -247,7 +320,7 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--instruments', help='comma-separated keys (default: '
                                           'ANALYZE_INSTRUMENTS)')
-    ap.add_argument('--bucket', default='ohlc_1m')
+    ap.add_argument('--bucket', default='ohlcv')
     ap.add_argument('--chunk', type=int, default=100)
     ap.add_argument('--vix', action='store_true', default=True,
                     help='include NSE_INDEX|India VIX (default on)')
@@ -266,25 +339,34 @@ def main() -> int:
         print(f'  symbol map unavailable ({e}); measurements will use raw keys')
 
     poller = OhlcPoller(keys, load_token(), smap, chunk=a.chunk)
-    print(f'poll_ohlc: {len(keys)} instruments, bucket={a.bucket}, '
-          f'{"DRY RUN" if a.dry_run else "writing"}, '
-          f'session {MARKET_OPEN:%H:%M}-{MARKET_CLOSE:%H:%M} IST')
+    by_exch = {}
+    for k in keys:
+        by_exch[exchange_of(k)] = by_exch.get(exchange_of(k), 0) + 1
+    hours = '  '.join(f'{e}->{EXCHANGE_CLOSE.get(e, dt_time(15, 40)):%H:%M}'
+                      for e in sorted(by_exch))
+    print(f'poll_ohlc: {len(keys)} instruments '
+          f'({", ".join(f"{e} {n}" for e, n in sorted(by_exch.items()))}), '
+          f'bucket={a.bucket}, {"DRY RUN" if a.dry_run else "writing"}')
+    print(f'  open {MARKET_OPEN:%H:%M}, closes  {hours}')
+
+    last_close = max(EXCHANGE_CLOSE.get(e, dt_time(15, 40)) for e in by_exch) \
+        if by_exch else dt_time(15, 40)
 
     fails = 0
     while True:
-        if not (a.ignore_hours or market_open_now()):
+        if not (a.ignore_hours or any_open(keys)):
             if a.once:
-                print('  market closed — use --ignore-hours to poll anyway')
+                print('  no exchange open — use --ignore-hours to poll anyway')
                 return 0
             n = _now()
-            if n.time() > MARKET_CLOSE or n.weekday() >= 5:
-                print(f'  session over at {n:%H:%M:%S} IST — stopping cleanly')
+            if n.time() > last_close or n.weekday() >= 5:
+                print(f'  all exchanges closed at {n:%H:%M:%S} IST — stopping cleanly')
                 return 0
             time.sleep(20)
             continue
 
         try:
-            rows = poller.poll_once()
+            rows = poller.poll_once(a.ignore_hours)
             if not rows:
                 fails += 1
                 print(f'  {_now():%H:%M:%S}  NO CANDLES ({fails}/{MAX_CONSECUTIVE_FAIL})',
@@ -292,15 +374,24 @@ def main() -> int:
             else:
                 fails = 0
                 n = 0 if a.dry_run else write_influx(rows, a.bucket)
-                stamp = datetime.fromtimestamp(rows[0]['ts_start'] / 1000, IST)
-                print(f'  {_now():%H:%M:%S}  candle {stamp:%H:%M}  '
+                # RANGE, not rows[0]. Mixed segments have different candle times —
+                # an NSE index after 15:30 returns its stale 15:29 bar while MCX is
+                # current, and printing only the first row asserted one time for all
+                # of them. A single stamp here is only correct when they agree.
+                stamps = sorted(r['ts_start'] for r in rows)
+                lo = datetime.fromtimestamp(stamps[0] / 1000, IST)
+                hi = datetime.fromtimestamp(stamps[-1] / 1000, IST)
+                span = f'{lo:%H:%M}' if lo == hi else f'{lo:%H:%M}-{hi:%H:%M}'
+                print(f'  {_now():%H:%M:%S}  candle {span}  '
                       f'{len(rows)} instruments'
                       + (f'  wrote {n}' if not a.dry_run else '  (dry run)'))
                 if a.dry_run:
-                    for r in rows[:5]:
-                        print(f'      {r["symbol"][:30]:<30} O {r["open"]:>9.2f} '
-                              f'H {r["high"]:>9.2f} L {r["low"]:>9.2f} '
-                              f'C {r["close"]:>9.2f} V {r["volume"]:>10,.0f}')
+                    for r in rows[:6]:
+                        ts = datetime.fromtimestamp(r['ts_start'] / 1000, IST)
+                        print(f'      {ts:%H:%M} {r["symbol"][:26]:<26} '
+                              f'O {r["open"]:>9.2f} H {r["high"]:>9.2f} '
+                              f'L {r["low"]:>9.2f} C {r["close"]:>9.2f} '
+                              f'V {r["volume"]:>9,.0f}')
                 while poller.gaps:
                     print(f'  GAP: {poller.gaps.pop(0)}', file=sys.stderr)
         except SystemExit:
