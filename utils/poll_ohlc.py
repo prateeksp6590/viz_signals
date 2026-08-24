@@ -289,6 +289,63 @@ def env_list(path: Path, key: str) -> list:
     return []
 
 
+def _has_master(p: Path):
+    return p if p.is_dir() and any(p.glob('*.json')) else None
+
+
+def find_master_dir(explicit=None):
+    """Where viz_hedge keeps NSE.json / BSE.json / MCX.json.
+
+    Explicit config is AUTHORITATIVE — if --master-dir or VIZHEDGE_DIR is given and
+    holds no master, return None rather than quietly searching elsewhere. Falling
+    back would resolve symbols against a different (possibly stale) instrument set
+    and write plausible-looking measurement names for the wrong contracts. Only when
+    nothing is configured do we go looking.
+    """
+    import os as _os
+    if explicit:
+        return _has_master(Path(explicit))
+    env = _os.getenv('VIZHEDGE_DIR')
+    if env:
+        return _has_master(Path(env) / 'data')
+    for c in (Path.home() / 'viz_hedge' / 'data',
+              REPO_ROOT.parent / 'viz_hedge' / 'data',
+              REPO_ROOT / 'data'):
+        if _has_master(c):
+            return c
+    return None
+
+
+def symbol_map_for(keys, master_dir) -> dict:
+    """instrument_key -> trading_symbol, for EVERY key we poll.
+
+    NOT src.main._load_symbol_map(): that resolves only ANALYZE_INSTRUMENTS, the
+    SENSEX chain the engine scores. Polling the whole feed with it left NSE keys
+    unresolved, so this bucket would have written `NSE_FO_61734` while the feeder
+    writes `NSE_NIFTY 24000 CE 25 AUG 26` for the same contract — two names for one
+    instrument across two buckets, which silently breaks any join between them.
+    Reading the master directly covers all of them.
+    """
+    import json
+    want, out = set(keys), {}
+    if not master_dir:
+        return out
+    for p in sorted(Path(master_dir).glob('*.json')):
+        try:
+            rows = json.loads(p.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+        if not isinstance(rows, list):
+            continue
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            k = r.get('instrument_key')
+            if k in want and r.get('trading_symbol'):
+                out[k] = r['trading_symbol']
+    return out
+
+
 def load_keys(args) -> list:
     """Everything the FEEDER subscribes to, not just what vizsignals analyses.
 
@@ -328,15 +385,21 @@ def main() -> int:
     ap.add_argument('--once', action='store_true', help='one poll, then exit')
     ap.add_argument('--dry-run', action='store_true', help='print, do not write')
     ap.add_argument('--ignore-hours', action='store_true')
+    ap.add_argument('--master-dir', default=None,
+                    help='instrument master dir (default: viz_hedge/data)')
     a = ap.parse_args()
 
     keys = load_keys(a)
-    smap = {}
-    try:
-        from src.main import _load_symbol_map
-        smap = _load_symbol_map() or {}
-    except Exception as e:
-        print(f'  symbol map unavailable ({e}); measurements will use raw keys')
+    mdir = find_master_dir(a.master_dir)
+    smap = symbol_map_for(keys, mdir)
+    miss = [k for k in keys if k not in smap and not k.startswith('NSE_INDEX')]
+    print(f'  symbol map: {len(smap)}/{len(keys)} resolved from '
+          f'{mdir or "NO MASTER FOUND"}')
+    if miss:
+        # Loud, because an unresolved key writes to a DIFFERENT measurement name
+        # than the feeder uses for the same contract.
+        print(f'  {len(miss)} unresolved -> will write as {{segment}}_{{token}}, '
+              f'which will NOT match tick_data. e.g. {miss[:2]}')
 
     poller = OhlcPoller(keys, load_token(), smap, chunk=a.chunk)
     by_exch = {}
