@@ -350,18 +350,50 @@ def write_influx(rows: list, bucket: str) -> int:
     return len(pts)
 
 
-def load_token() -> str:
-    import os
+def _read_token():
     tok = os.getenv('UPSTOX_ACCESS_TOKEN', '').strip()
     if tok:
         return tok
-    # fall back to viz_hedge's daily cache, so both processes share one token
+    # viz_hedge's daily cache, so both processes share one token
     cache = Path(os.getenv('UPSTOX_TOKEN_DIR',
                            str(Path.home() / 'viz_hedge' / 'tokens')))
     f = cache / f'acc_tk_{_now():%Y%m%d}'
     if f.exists():
-        return f.read_text(encoding='utf-8').strip()
-    raise SystemExit(f'No token: set UPSTOX_ACCESS_TOKEN or provide {f}')
+        t = f.read_text(encoding='utf-8').strip()
+        if t:
+            return t
+    return None
+
+
+def load_token(wait_secs: int = 0) -> str:
+    """Wait for today's token rather than dying without it.
+
+    The timer starts this at 08:58 (MCX opens 09:00) but vizhedge-prep does not mint
+    the token until ~09:09, so the first run exited 1 every morning, fired a spurious
+    OnFailure alert, and only recovered because Restart=on-failure kept retrying.
+    Chaining the units on start order would couple them; waiting decouples them —
+    the poller simply begins the moment the token exists, whenever prep gets there.
+    """
+    deadline = time.time() + max(0, wait_secs)
+    said = False
+    while True:
+        tok = _read_token()
+        if tok:
+            if said:
+                print(f'  token appeared at {_now():%H:%M:%S}')
+            return tok
+        if time.time() >= deadline:
+            cache = Path(os.getenv('UPSTOX_TOKEN_DIR',
+                                   str(Path.home() / 'viz_hedge' / 'tokens')))
+            raise SystemExit(
+                f'No token after waiting {wait_secs}s: set UPSTOX_ACCESS_TOKEN or '
+                f'provide {cache}/acc_tk_{_now():%Y%m%d} '
+                f'(vizhedge-prep normally writes it ~09:09)')
+        if not said:
+            print(f'  waiting for today\'s token (vizhedge-prep writes it ~09:09), '
+                  f'up to {wait_secs}s...')
+            said = True
+        time.sleep(15)
 
 
 def env_list(path: Path, key: str) -> list:
@@ -476,6 +508,8 @@ def main() -> int:
     ap.add_argument('--once', action='store_true', help='one poll, then exit')
     ap.add_argument('--dry-run', action='store_true', help='print, do not write')
     ap.add_argument('--ignore-hours', action='store_true')
+    ap.add_argument('--wait-token', type=int, default=2400,
+                    help='seconds to wait for today\'s token (prep writes it ~09:09)')
     ap.add_argument('--master-dir', default=None,
                     help='instrument master dir (default: viz_hedge/data)')
     a = ap.parse_args()
@@ -492,7 +526,7 @@ def main() -> int:
         print(f'  {len(miss)} unresolved -> will write as {{segment}}_{{token}}, '
               f'which will NOT match tick_data. e.g. {miss[:2]}')
 
-    poller = OhlcPoller(keys, load_token(), smap, chunk=a.chunk)
+    poller = OhlcPoller(keys, load_token(a.wait_token), smap, chunk=a.chunk)
     by_exch = {}
     for k in keys:
         by_exch[exchange_of(k)] = by_exch.get(exchange_of(k), 0) + 1
